@@ -94,18 +94,45 @@ def extract_table_rows(bak_file_path, table_name):
 		proc.wait()
 
 
+def _get_mssql_credentials(settings):
+	"""
+	Return (host, port, database, user, password) for the SQL Server connection.
+
+	Priority:
+	  1. site_config.json keys (epromise_mssql_*) — set via `bench set-config`
+	     These never appear in database dumps and survive site restores.
+	  2. ePromise Settings DocType values (stored encrypted in the DB).
+
+	Set on production with:
+	  bench --site [site] set-config epromise_mssql_host    "37.224.24.154"
+	  bench --site [site] set-config epromise_mssql_port    14335
+	  bench --site [site] set-config epromise_mssql_database "SteelForce_Bahrain_2026"
+	  bench --site [site] set-config epromise_mssql_username "sa"
+	  bench --site [site] set-config epromise_mssql_password "your-password"
+	"""
+	import frappe
+
+	conf = frappe.conf  # loaded from site_config.json
+
+	host     = conf.get("epromise_mssql_host")     or (settings.mssql_host or "").strip()
+	port     = int(conf.get("epromise_mssql_port") or settings.mssql_port or 1433)
+	database = conf.get("epromise_mssql_database") or (settings.mssql_database or "").strip()
+	user     = conf.get("epromise_mssql_username") or (settings.mssql_username or "").strip()
+	password = conf.get("epromise_mssql_password") or settings.get_password("mssql_password") or ""
+
+	return host, port, database, user, password
+
+
 def connect_mssql(settings):
 	"""
-	Return a pymssql connection using live SQL Server credentials from settings.
-	Raises a clear error if credentials are missing or connection fails.
-	"""
-	import pymssql  # already installed: pymssql 2.3.13
+	Return a pymssql connection.
 
-	host = (settings.mssql_host or "").strip()
-	port = int(settings.mssql_port or 1433)
-	database = (settings.mssql_database or "").strip()
-	user = (settings.mssql_username or "").strip()
-	password = settings.get_password("mssql_password") or ""
+	Credentials are resolved via _get_mssql_credentials():
+	  site_config.json (epromise_mssql_*) overrides ePromise Settings DB values.
+	"""
+	import pymssql
+
+	host, port, database, user, password = _get_mssql_credentials(settings)
 
 	if not host:
 		raise ValueError("ePromise Settings: SQL Server Host is required for live connection.")
