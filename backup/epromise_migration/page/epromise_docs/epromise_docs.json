@@ -1,0 +1,9 @@
+{
+ "doctype": "Page",
+ "module": "ePromise Migration",
+ "name": "epromise-docs",
+ "page_name": "epromise-docs",
+ "roles": [{"role": "System Manager"}],
+ "standard": "Yes",
+ "title": "ePromise Migration Documentation"
+}

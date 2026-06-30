@@ -1,0 +1,9 @@
+{
+ "doctype": "Page",
+ "module": "ePromise Migration",
+ "name": "epromise-mapping-guide",
+ "page_name": "epromise-mapping-guide",
+ "roles": [{"role": "System Manager"}],
+ "standard": "Yes",
+ "title": "ePromise Mapping Guide"
+}

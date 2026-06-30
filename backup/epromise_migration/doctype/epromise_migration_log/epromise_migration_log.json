@@ -1,0 +1,125 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-05-15 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "migration_type",
+  "status",
+  "column_break_1",
+  "started_at",
+  "completed_at",
+  "summary_section",
+  "total_records",
+  "success_count",
+  "column_break_2",
+  "skipped_count",
+  "error_count",
+  "log_section",
+  "log_details"
+ ],
+ "fields": [
+  {
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "EPM-.YYYY.-.####"
+  },
+  {
+   "fieldname": "migration_type",
+   "fieldtype": "Select",
+   "label": "Migration Type",
+   "options": "\nCustomer Master\nSupplier Master\nSales Invoice\nSales Return\nPurchase Receipt\nPurchase Invoice\nPurchase Return\nPayment Entry\nJournal Entry",
+   "reqd": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "\nQueued\nRunning\nStop Requested\nStopped\nCompleted\nFailed",
+   "default": "Running"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started At"
+  },
+  {
+   "fieldname": "completed_at",
+   "fieldtype": "Datetime",
+   "label": "Completed At"
+  },
+  {
+   "fieldname": "summary_section",
+   "fieldtype": "Section Break",
+   "label": "Summary"
+  },
+  {
+   "fieldname": "total_records",
+   "fieldtype": "Int",
+   "label": "Total Records",
+   "default": "0"
+  },
+  {
+   "fieldname": "success_count",
+   "fieldtype": "Int",
+   "label": "Success",
+   "default": "0"
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "skipped_count",
+   "fieldtype": "Int",
+   "label": "Skipped",
+   "default": "0"
+  },
+  {
+   "fieldname": "error_count",
+   "fieldtype": "Int",
+   "label": "Errors",
+   "default": "0"
+  },
+  {
+   "fieldname": "log_section",
+   "fieldtype": "Section Break",
+   "label": "Log Details"
+  },
+  {
+   "fieldname": "log_details",
+   "fieldtype": "Long Text",
+   "label": "Log"
+  }
+ ],
+ "links": [],
+ "modified": "2026-05-15 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ePromise Migration",
+ "name": "ePromise Migration Log",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

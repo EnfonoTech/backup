@@ -1,0 +1,269 @@
+{
+ "actions": [],
+ "creation": "2026-05-15 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "source_section",
+  "backup_file_path",
+  "column_break_1",
+  "mssql_host",
+  "mssql_port",
+  "mssql_database",
+  "mssql_username",
+  "mssql_password",
+  "erpnext_section",
+  "erpnext_company",
+  "column_break_2",
+  "default_customer_group",
+  "default_territory",
+  "default_currency",
+  "invoice_section",
+  "default_income_account",
+  "default_tax_account",
+  "default_debit_account",
+  "column_break_4",
+  "default_item_group",
+  "placeholder_item_code",
+  "submit_invoices",
+  "purchase_section",
+  "default_supplier_group",
+  "default_payable_account",
+  "default_expense_account",
+  "default_warehouse",
+  "column_break_5",
+  "import_section",
+  "invoice_from_date",
+  "invoice_to_date",
+  "column_break_3",
+  "batch_size",
+  "skip_existing"
+ ],
+ "fields": [
+  {
+   "fieldname": "source_section",
+   "fieldtype": "Section Break",
+   "label": "ePromise Source (Backup File)"
+  },
+  {
+   "fieldname": "backup_file_path",
+   "fieldtype": "Data",
+   "label": "Backup File Path (.bak)",
+   "description": "Full path to the ePromise SQL Server .bak backup file"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break",
+   "label": "Live SQL Server Connection (Optional)"
+  },
+  {
+   "fieldname": "mssql_host",
+   "fieldtype": "Data",
+   "label": "SQL Server Host"
+  },
+  {
+   "fieldname": "mssql_port",
+   "fieldtype": "Int",
+   "label": "SQL Server Port",
+   "default": "1433"
+  },
+  {
+   "fieldname": "mssql_database",
+   "fieldtype": "Data",
+   "label": "Database Name"
+  },
+  {
+   "fieldname": "mssql_username",
+   "fieldtype": "Data",
+   "label": "Username"
+  },
+  {
+   "fieldname": "mssql_password",
+   "fieldtype": "Password",
+   "label": "Password"
+  },
+  {
+   "fieldname": "erpnext_section",
+   "fieldtype": "Section Break",
+   "label": "ERPNext Defaults"
+  },
+  {
+   "fieldname": "erpnext_company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "default_customer_group",
+   "fieldtype": "Link",
+   "label": "Default Customer Group",
+   "options": "Customer Group",
+   "default": "Commercial"
+  },
+  {
+   "fieldname": "default_territory",
+   "fieldtype": "Link",
+   "label": "Default Territory",
+   "options": "Territory",
+   "default": "All Territories"
+  },
+  {
+   "fieldname": "default_currency",
+   "fieldtype": "Link",
+   "label": "Default Currency",
+   "options": "Currency",
+   "default": "BHD"
+  },
+  {
+   "fieldname": "invoice_section",
+   "fieldtype": "Section Break",
+   "label": "Sales Invoice Defaults"
+  },
+  {
+   "fieldname": "default_income_account",
+   "fieldtype": "Link",
+   "label": "Default Income Account",
+   "options": "Account",
+   "description": "Used when no item-level income account is set"
+  },
+  {
+   "fieldname": "default_tax_account",
+   "fieldtype": "Link",
+   "label": "VAT / Tax Account",
+   "options": "Account",
+   "description": "Account for VAT charges on invoices"
+  },
+  {
+   "fieldname": "default_debit_account",
+   "fieldtype": "Link",
+   "label": "Receivable Account (Debit To)",
+   "options": "Account",
+   "description": "Receivable account matching the invoice currency (e.g. Debtors BHD - K)"
+  },
+  {
+   "fieldname": "column_break_4",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "default_item_group",
+   "fieldtype": "Link",
+   "label": "Default Item Group",
+   "options": "Item Group",
+   "default": "Products"
+  },
+  {
+   "fieldname": "placeholder_item_code",
+   "fieldtype": "Data",
+   "label": "Placeholder Item Code",
+   "default": "ePromise-Import-Item",
+   "description": "Item used for invoices that have no line item data in ePromise"
+  },
+  {
+   "fieldname": "submit_invoices",
+   "fieldtype": "Check",
+   "label": "Submit Invoices After Import",
+   "default": "0",
+   "description": "If checked, invoices will be submitted (posted). Otherwise saved as Draft."
+  },
+  {
+   "fieldname": "purchase_section",
+   "fieldtype": "Section Break",
+   "label": "Purchase Invoice Defaults"
+  },
+  {
+   "fieldname": "default_supplier_group",
+   "fieldtype": "Link",
+   "label": "Default Supplier Group",
+   "options": "Supplier Group",
+   "default": "All Supplier Groups"
+  },
+  {
+   "fieldname": "default_payable_account",
+   "fieldtype": "Link",
+   "label": "Payable Account (Credit To)",
+   "options": "Account",
+   "description": "Payable account matching invoice currency (e.g. Creditors - K)"
+  },
+  {
+   "fieldname": "default_expense_account",
+   "fieldtype": "Link",
+   "label": "Default Expense / COGS Account",
+   "options": "Account",
+   "description": "Used for purchase invoice item lines"
+  },
+  {
+   "fieldname": "default_warehouse",
+   "fieldtype": "Link",
+   "label": "Default Warehouse",
+   "options": "Warehouse",
+   "description": "Default warehouse for Purchase Receipt items. Leave blank to auto-detect from company."
+  },
+  {
+   "fieldname": "column_break_5",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "import_section",
+   "fieldtype": "Section Break",
+   "label": "Import Options"
+  },
+  {
+   "fieldname": "invoice_from_date",
+   "fieldtype": "Date",
+   "label": "Invoice From Date",
+   "description": "Import invoices on or after this date (leave blank for all)"
+  },
+  {
+   "fieldname": "invoice_to_date",
+   "fieldtype": "Date",
+   "label": "Invoice To Date",
+   "description": "Import invoices on or before this date (leave blank for all)"
+  },
+  {
+   "fieldname": "column_break_3",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "batch_size",
+   "fieldtype": "Int",
+   "label": "Batch Size",
+   "default": "50"
+  },
+  {
+   "fieldname": "skip_existing",
+   "fieldtype": "Check",
+   "label": "Skip Existing Records",
+   "default": "1",
+   "description": "Skip if already imported (checks epromise_vr_no on Sales Invoice)"
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-05-16 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ePromise Migration",
+ "name": "ePromise Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 0
+}
