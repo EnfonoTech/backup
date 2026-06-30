@@ -82,8 +82,7 @@ app_license = "mit"
 # Installation
 # ------------
 
-# before_install = "backup.install.before_install"
-# after_install = "backup.install.after_install"
+after_install = "backup.install.after_install"
 
 # Uninstallation
 # ------------

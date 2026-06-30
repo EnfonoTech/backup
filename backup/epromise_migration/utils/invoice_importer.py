@@ -372,6 +372,21 @@ def _set_doc_totals(inv, conversion_rate=1.0):
     return inv
 
 
+def _get_output_tax_account(settings):
+    """
+    Return the output (sales) VAT account.
+    Prefers settings.default_tax_account; falls back to auto-detecting
+    a Tax-type account under Liabilities for the company.
+    """
+    if settings.default_tax_account:
+        return settings.default_tax_account
+    return frappe.db.get_value(
+        "Account",
+        {"company": settings.erpnext_company, "account_type": "Tax", "root_type": "Liability", "is_group": 0},
+        "name",
+    )
+
+
 def _get_tax_rows(vat_amount, tax_account):
     """Build taxes child table for a known VAT amount (actual value, not %)."""
     if not vat_amount or not tax_account or flt(vat_amount) == 0:
@@ -379,7 +394,7 @@ def _get_tax_rows(vat_amount, tax_account):
     return [{
         "charge_type": "Actual",
         "account_head": tax_account,
-        "description": "VAT",
+        "description": "Output VAT",
         "tax_amount": flt(vat_amount),
         "included_in_print_rate": 0,
     }]
@@ -683,8 +698,8 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
             "description": ref_desc,
         })
 
-    # VAT tax rows
-    taxes = _get_tax_rows(vat_amt, settings.default_tax_account)
+    # Output VAT tax rows (liability — collected from customer)
+    taxes = _get_tax_rows(vat_amt, _get_output_tax_account(settings))
 
     inv = {
         "doctype": "Sales Invoice",

@@ -31,7 +31,7 @@
    "fieldname": "migration_type",
    "fieldtype": "Select",
    "label": "Migration Type",
-   "options": "\nCustomer Master\nSupplier Master\nSales Invoice\nSales Return\nPurchase Receipt\nPurchase Invoice\nPurchase Return\nPayment Entry\nJournal Entry\nExcel: Customers\nExcel: Suppliers\nExcel: Sales Invoices\nExcel: Purchase Invoices\nExcel: Payment Entries\nExcel: Journal Entries",
+   "options": "Item Master\n\nCustomer Master\nSupplier Master\nSales Invoice\nSales Return\nPurchase Receipt\nPurchase Invoice\nPurchase Return\nPayment Entry\nJournal Entry\nExcel: Customers\nExcel: Suppliers\nExcel: Sales Invoices\nExcel: Purchase Invoices\nExcel: Payment Entries\nExcel: Journal Entries",
    "reqd": 1
   },
   {

@@ -464,12 +464,23 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
             "description": f"Ref: {bill_no or vr_no} | {acc_name}",
         })
 
+    # Use input VAT account (Asset/recoverable) for purchases.
+    # Prefer settings.default_input_tax_account; fall back to auto-detecting
+    # by finding a Tax-type account under Assets for this company.
+    input_tax_account = getattr(settings, "default_input_tax_account", None)
+    if not input_tax_account:
+        input_tax_account = frappe.db.get_value(
+            "Account",
+            {"company": settings.erpnext_company, "account_type": "Tax", "root_type": "Asset", "is_group": 0},
+            "name",
+        ) or settings.default_tax_account
+
     taxes = []
-    if vat_amt and settings.default_tax_account and flt(vat_amt) != 0:
+    if vat_amt and input_tax_account and flt(vat_amt) != 0:
         taxes.append({
             "charge_type": "Actual",
-            "account_head": settings.default_tax_account,
-            "description": "VAT",
+            "account_head": input_tax_account,
+            "description": "Input VAT",
             "tax_amount": flt(vat_amt),
         })
 

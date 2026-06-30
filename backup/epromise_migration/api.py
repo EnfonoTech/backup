@@ -288,9 +288,10 @@ def _import_sales_invoice(doc_data):
             "debit_to":         _v(p.get("Debit To")),
             "company":          _v(p.get("Company")) or COMPANY,
             "epromise_vr_no":   vr_no,
-            "epromise_trc_code": _v(p.get("ePromise TRC Code")),
-            "remarks":          _v(p.get("Remarks")),
-            "items":            items,
+            "epromise_trc_code":    _v(p.get("ePromise TRC Code")),
+            "remarks":              _v(p.get("Remarks")),
+            "disable_rounded_total": 1,
+            "items":                items,
         })
         doc.flags.ignore_permissions = True
         doc.flags.ignore_mandatory   = True
@@ -349,9 +350,10 @@ def _import_purchase_invoice(doc_data):
             "credit_to":        _v(p.get("Credit To")),
             "company":          _v(p.get("Company")) or COMPANY,
             "epromise_vr_no":   vr_no,
-            "epromise_trc_code": _v(p.get("ePromise TRC Code")),
-            "remarks":          _v(p.get("Remarks")),
-            "items":            items,
+            "epromise_trc_code":    _v(p.get("ePromise TRC Code")),
+            "remarks":              _v(p.get("Remarks")),
+            "disable_rounded_total": 1,
+            "items":                items,
         })
         doc.flags.ignore_permissions = True
         doc.flags.ignore_mandatory   = True

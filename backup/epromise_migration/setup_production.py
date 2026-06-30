@@ -373,11 +373,101 @@ def setup_custom_fields():
             print(f"   {dt}.epromise_vr_no — exists")
 
 
-# ─── 10. COA — ensure key accounts exist ─────────────────────────────────────
+# ─── 10. Global / accounting settings ───────────────────────────────────────
+
+def setup_global_settings():
+    """
+    Apply system-wide accounting defaults required for the migration:
+      - disable_rounded_total on every SI/PI (set per-document; no global switch in v15)
+      - BHD currency symbol
+      - Fiscal Year existence check
+    """
+    print("\n[10] Global / Accounting Settings")
+
+    # BHD currency symbol
+    cur_symbol = frappe.db.get_value("Currency", "BHD", "symbol")
+    if cur_symbol != "د.ب":
+        frappe.db.set_value("Currency", "BHD", "symbol", "د.ب")
+        frappe.db.commit()
+        print(f"  UPDATED  BHD symbol → د.ب")
+    else:
+        print(f"  OK       BHD symbol: {cur_symbol}")
+
+    # BHD fraction
+    frac = frappe.db.get_value("Currency", "BHD", "fraction_units")
+    if not frac or int(frac) != 1000:
+        frappe.db.set_value("Currency", "BHD", "fraction_units", 1000)
+        frappe.db.set_value("Currency", "BHD", "fraction", "Fils")
+        frappe.db.set_value("Currency", "BHD", "smallest_currency_fraction_value", 0.001)
+        frappe.db.commit()
+        print(f"  UPDATED  BHD fraction → 1000 Fils")
+    else:
+        print(f"  OK       BHD fraction: 1000 Fils")
+
+    # Fiscal Year covering 2026
+    fy = frappe.db.get_value(
+        "Fiscal Year",
+        {"year_start_date": ["<=", "2026-01-01"], "year_end_date": [">=", "2026-12-31"]},
+        "name",
+    )
+    if fy:
+        print(f"  OK       Fiscal Year: {fy}")
+    else:
+        print(f"  MISSING  Fiscal Year covering 2026-01-01 to 2026-12-31")
+        print(f"           Create via: Accounting → Fiscal Year → New")
+
+    # Accounting Period — must be OPEN for Jan-May 2026
+    closed = frappe.db.sql("""
+        SELECT name FROM `tabAccounting Period`
+        WHERE CAST(start_date AS DATE) <= '2026-05-31'
+          AND CAST(end_date AS DATE)   >= '2026-01-01'
+          AND closed = 1
+        LIMIT 1
+    """)
+    if closed:
+        print(f"  WARN     An Accounting Period covering Jan-May 2026 is CLOSED — re-open it before importing")
+    else:
+        print(f"  OK       Accounting Period Jan-May 2026 is open (or no period set)")
+
+
+def check_tax_accounts():
+    """Verify input and output VAT accounts exist for the company."""
+    print("\n[11] VAT Accounts")
+
+    output_vat = frappe.db.get_value(
+        "Account",
+        {"company": COMPANY, "account_type": "Tax", "root_type": "Liability", "is_group": 0},
+        ["name", "account_type"],
+        as_dict=True,
+    )
+    if output_vat:
+        print(f"  OK      Output VAT (Sales): {output_vat.name}")
+    else:
+        print(f"  MISSING Output VAT account (Tax type, Liability root) — create in COA")
+        print(f"          Used as: Sales Invoice → taxes → Output VAT")
+
+    input_vat = frappe.db.get_value(
+        "Account",
+        {"company": COMPANY, "account_type": "Tax", "root_type": "Asset", "is_group": 0},
+        ["name", "account_type"],
+        as_dict=True,
+    )
+    if input_vat:
+        print(f"  OK      Input VAT (Purchase): {input_vat.name}")
+    else:
+        print(f"  MISSING Input VAT account (Tax type, Asset root) — create in COA")
+        print(f"          Used as: Purchase Invoice → taxes → Input VAT")
+
+    if output_vat and input_vat:
+        print(f"\n  NOTE: Set 'default_tax_account' in ePromise Settings to: {output_vat.name}")
+        print(f"  The purchase importer will auto-detect the input account: {input_vat.name}")
+
+
+# ─── 12. COA — ensure key accounts exist ─────────────────────────────────────
 
 def check_coa_accounts():
     """Print status of critical accounts the importer references."""
-    print("\n[11] COA — Critical Account Check")
+    print("\n[12] COA — Critical Account Check")
     required = [
         ("1303 - Accounts Receivables - SFTB",                "AR group (parent for customer ledgers)"),
         ("130301 - Accounts Receivable - SFTB",               "AR control account on Sales Invoices"),
@@ -427,6 +517,8 @@ def run_setup():
     setup_supplier_groups()
     setup_modes_of_payment()
     setup_custom_fields()
+    setup_global_settings()
+    check_tax_accounts()
     check_coa_accounts()
 
     frappe.db.commit()

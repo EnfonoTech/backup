@@ -87,6 +87,20 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 				<span id="status-suppliers" class="ml-3 text-muted small"></span>
 			</div>
 
+			<!-- Item Master Import -->
+			<div class="card mb-4 p-4">
+				<h5>Step 1c — Import Item Master</h5>
+				<p class="text-muted small">
+					Reads <strong>Copy of Bahrain Master 16.6.26 (1) (1).xls</strong> (must be in <code>apps/backup/</code>).
+					Creates Items using <strong>Unified Code</strong> as <code>item_code</code>.
+					Already-existing items are skipped. Run before importing invoices or receipts.
+				</p>
+				<button class="btn btn-primary btn-sm" id="btn-import-items">
+					Import Item Master
+				</button>
+				<span id="status-items" class="ml-3 text-muted small"></span>
+			</div>
+
 			<!-- Invoice Import -->
 			<div class="card mb-4 p-4">
 				<h5>Step 2 — Import Sales Invoices</h5>
@@ -278,6 +292,7 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 		const steps = [
 			["status-customers",       "Customer",         "epromise_acc_code",  null,   "Customer"],
 			["status-suppliers",       "Supplier",         "epromise_acc_code",  null,   "Supplier"],
+			["status-items",           "Item",             "epromise_ite_code",  null,   "Item"],
 			["status-invoices",        "Sales Invoice",    "epromise_trc_code",  ["S01","S06"], "Sales Invoice"],
 			["status-sales-returns",   "Sales Invoice",    "epromise_trc_code",  ["R01","R04"], "Sales Return"],
 			["status-receipts",        "Purchase Receipt", "epromise_trc_code",  ["GRN","GR"],  "Purchase Receipt"],
@@ -487,6 +502,14 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 			"backup.epromise_migration.utils.supplier_importer.import_suppliers",
 			this,
 			wrapper.querySelector("#status-suppliers")
+		);
+	};
+
+	wrapper.querySelector("#btn-import-items").onclick = function () {
+		run_import(
+			"backup.epromise_migration.utils.item_importer.import_item_master",
+			this,
+			wrapper.querySelector("#status-items")
 		);
 	};
 
