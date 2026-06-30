@@ -156,20 +156,31 @@ def _get_or_create_supplier(acc_code, acc_name, settings, supplier_cache):
         return display_name
 
 
-def _get_or_create_item(ite_code, item_master_map, settings, item_cache):
+def _get_or_create_item(ite_code, item_master_map, settings, item_cache, unified_map=None):
+    """Return ERPNext item_code (= unified_code), auto-creating the Item if needed."""
     if not ite_code:
         return settings.placeholder_item_code or "ePromise-Import-Item"
-    if ite_code in item_cache:
-        return ite_code
-    if frappe.db.exists("Item", ite_code):
-        item_cache.add(ite_code)
-        return ite_code
-    master = item_master_map.get(ite_code, {})
-    item_name = (master.get("ite_name") or ite_code).strip()
-    uom = _ensure_uom(_map_uom(master.get("base_uom") or "NOS"))
+
+    uni = (unified_map or {}).get(str(ite_code))
+    unified_code = uni["unified_code"] if uni else str(ite_code)
+
+    if unified_code in item_cache:
+        return unified_code
+    if frappe.db.exists("Item", unified_code):
+        item_cache.add(unified_code)
+        return unified_code
+
+    if uni and uni.get("ite_name"):
+        item_name = uni["ite_name"]
+        uom = _ensure_uom(_map_uom(uni.get("ite_unit") or "NOS"))
+    else:
+        master = item_master_map.get(str(ite_code), {})
+        item_name = (master.get("ite_name") or unified_code).strip()
+        uom = _ensure_uom(_map_uom(master.get("base_uom") or "NOS"))
+
     try:
         doc = frappe.get_doc({
-            "doctype": "Item", "item_code": ite_code, "item_name": item_name,
+            "doctype": "Item", "item_code": unified_code, "item_name": item_name,
             "item_group": settings.default_item_group or "Products",
             "stock_uom": uom, "is_stock_item": 0,
             "is_sales_item": 1, "is_purchase_item": 1, "description": item_name,
@@ -178,10 +189,10 @@ def _get_or_create_item(ite_code, item_master_map, settings, item_cache):
         frappe.db.commit()
     except Exception:
         frappe.db.rollback()
-        if not frappe.db.exists("Item", ite_code):
+        if not frappe.db.exists("Item", unified_code):
             raise
-    item_cache.add(ite_code)
-    return ite_code
+    item_cache.add(unified_code)
+    return unified_code
 
 
 def _get_or_create_service_item(acc_code, acc_name, settings, item_cache):
@@ -348,7 +359,7 @@ _TRC_PINV_META = {
 
 def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
                              placeholder_code, settings, supplier_cache,
-                             item_cache, item_name_cache, grn_pr_map=None):
+                             item_cache, item_name_cache, grn_pr_map=None, unified_map=None):
     trc_code  = hdr.get("trc_code", "")
     vr_no     = str(hdr.get("vr_no") or "").strip()
     acc_code  = (hdr.get("acc_code") or "").strip()
@@ -380,11 +391,13 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
     # Stock/inventory items
     for line in item_lines:
         orig_ite = (line.get("ite_code") or "").strip()
-        ite_code  = _get_or_create_item(orig_ite, item_master_map, settings, item_cache)
+        ite_code  = _get_or_create_item(orig_ite, item_master_map, settings, item_cache, unified_map=unified_map)
         uom       = _ensure_uom(_map_uom(line.get("base_uom") or line.get("x_unit")))
         qty       = flt(line.get("ite_qty") or 1)
         rate      = flt(line.get("ite_rate") or 0)
+        uni = (unified_map or {}).get(str(orig_ite))
         item_name = item_name_cache.get(ite_code) or \
+            (uni and uni.get("ite_name")) or \
             (item_master_map.get(orig_ite) or {}).get("ite_name") or orig_ite
         item_name_cache[ite_code] = item_name
 
@@ -528,6 +541,10 @@ def _run_purchase_import(log_name, trc_codes=None):
     item_master_map = _load_item_master_live(conn)
     conn.close()
 
+    # Load unified item code map: ite_code → unified_code (authoritative ERPNext item_code)
+    from backup.epromise_migration.utils.unified_code_map import load_unified_map
+    unified_map = load_unified_map()
+
     supplier_cache  = _preload_supplier_cache()
     item_cache      = _preload_item_cache()
     item_name_cache = _preload_item_name_cache()
@@ -590,7 +607,7 @@ def _run_purchase_import(log_name, trc_codes=None):
                 inv_dict = _build_purchase_invoice(
                     hdr, item_lines, expense_lines, item_master_map,
                     placeholder_code, settings, supplier_cache, item_cache, item_name_cache,
-                    grn_pr_map=grn_pr_map,
+                    grn_pr_map=grn_pr_map, unified_map=unified_map,
                 )
                 if not inv_dict:
                     skipped += 1

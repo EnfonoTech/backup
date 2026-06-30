@@ -40,6 +40,19 @@ frappe.init(site="ksa", sites_path="/home/gym/new-bench/sites")
 frappe.connect()
 frappe.set_user("Administrator")
 
+# Load unified item code map: ite_code → unified_code
+# The current item_code in ERPNext SI/PI items IS the ite_code.
+# For ~170 items, unified_code differs — use it as the authoritative ERPNext item_code.
+from backup.epromise_migration.utils.unified_code_map import load_unified_map, get_erp_item_code
+_unified_map = load_unified_map()
+
+
+def _resolve_item_code(raw_code):
+    """Map a staging ERPNext item_code (= ite_code) to unified_code for production."""
+    if not raw_code:
+        return raw_code
+    return get_erp_item_code(str(raw_code), _unified_map)
+
 TODAY    = datetime.date.today().strftime("%Y-%m-%d")
 OUT_FILE = f"/home/gym/new-bench/apps/backup/epromise_export_SFTB_{TODAY}.xlsx"
 
@@ -173,7 +186,7 @@ for r in rows_raw:
                    r.debit_to, r.company, r.epromise_vr_no, r.epromise_trc_code, r.remarks] \
                   if is_first else [""] * len(P_SI)
 
-    child_vals  = [r.item_code, r.item_name, r.qty, r.uom,
+    child_vals  = [_resolve_item_code(r.item_code), r.item_name, r.qty, r.uom,
                    r.rate, r.amount, r.income_account, r.cost_center]
 
     data.append(parent_vals + child_vals)
@@ -222,7 +235,7 @@ for r in rows_raw:
                    r.credit_to, r.company, r.epromise_vr_no, r.epromise_trc_code, r.remarks] \
                   if is_first else [""] * len(P_PI)
 
-    child_vals  = [r.item_code, r.item_name, r.qty, r.uom,
+    child_vals  = [_resolve_item_code(r.item_code), r.item_name, r.qty, r.uom,
                    r.rate, r.amount, r.expense_account, r.cost_center]
 
     data.append(parent_vals + child_vals)

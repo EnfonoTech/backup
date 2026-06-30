@@ -214,27 +214,38 @@ def _get_or_create_customer(acc_code, acc_name, settings, customer_cache):
         return display_name
 
 
-def _get_or_create_item(ite_code, item_master_map, settings, item_cache):
-    """Return ERPNext item_code, auto-creating if needed. Uses in-memory cache."""
+def _get_or_create_item(ite_code, item_master_map, settings, item_cache, unified_map=None):
+    """
+    Return ERPNext item_code (= unified_code), auto-creating the Item if needed.
+    unified_map: {str(ite_code): {unified_code, ite_name, ite_unit}} from unified_code_map.py
+    """
     if not ite_code:
         return settings.placeholder_item_code or "ePromise-Import-Item"
 
-    if ite_code in item_cache:
-        return ite_code
+    # Resolve: unified_code is the authoritative ERPNext item_code
+    uni = (unified_map or {}).get(str(ite_code))
+    unified_code = uni["unified_code"] if uni else str(ite_code)
 
-    # Live check — cache may be stale if a previous run rolled back a creation
-    if frappe.db.exists("Item", ite_code):
-        item_cache.add(ite_code)
-        return ite_code
+    if unified_code in item_cache:
+        return unified_code
 
-    master = item_master_map.get(ite_code, {})
-    item_name = (master.get("ite_name") or ite_code).strip()
-    uom = _ensure_uom(_map_uom(master.get("base_uom") or "NOS"))
+    if frappe.db.exists("Item", unified_code):
+        item_cache.add(unified_code)
+        return unified_code
+
+    # Name + UOM: prefer unified_map (more authoritative), fallback to DICIHMAS
+    if uni and uni.get("ite_name"):
+        item_name = uni["ite_name"]
+        uom = _ensure_uom(_map_uom(uni.get("ite_unit") or "NOS"))
+    else:
+        master = item_master_map.get(str(ite_code), {})
+        item_name = (master.get("ite_name") or unified_code).strip()
+        uom = _ensure_uom(_map_uom(master.get("base_uom") or "NOS"))
 
     try:
         doc = frappe.get_doc({
             "doctype": "Item",
-            "item_code": ite_code,
+            "item_code": unified_code,
             "item_name": item_name,
             "item_group": settings.default_item_group or "Products",
             "stock_uom": uom,
@@ -244,13 +255,13 @@ def _get_or_create_item(ite_code, item_master_map, settings, item_cache):
             "description": item_name,
         })
         doc.insert(ignore_permissions=True)
-        frappe.db.commit()  # commit immediately
+        frappe.db.commit()
     except Exception:
         frappe.db.rollback()
-        if not frappe.db.exists("Item", ite_code):
+        if not frappe.db.exists("Item", unified_code):
             raise
-    item_cache.add(ite_code)
-    return ite_code
+    item_cache.add(unified_code)
+    return unified_code
 
 
 def _ensure_placeholder_item(settings):
@@ -593,7 +604,7 @@ def _iter_invoices(settings, trc_codes=None):
 
 # ─── invoice builder ──────────────────────────────────────────────────────────
 
-def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, customer_cache, item_cache, item_name_cache, sales_mappings=None):
+def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, customer_cache, item_cache, item_name_cache, sales_mappings=None, unified_map=None):
     """
     Map ePromise header + lines to an ERPNext Sales Invoice dict.
     Returns None if the header cannot be mapped.
@@ -630,13 +641,15 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
     if lines:
         for line in lines:
             orig_ite_code = (line.get("ite_code") or "").strip()
-            ite_code = _get_or_create_item(orig_ite_code, item_master_map, settings, item_cache)
+            ite_code = _get_or_create_item(orig_ite_code, item_master_map, settings, item_cache, unified_map=unified_map)
             uom = _ensure_uom(_map_uom(line.get("x_unit")))
             qty = flt(line.get("ite_qty") or 1)
             rate = flt(line.get("ite_rate") or 0)
+            uni = (unified_map or {}).get(str(orig_ite_code))
             item_name = item_name_cache.get(ite_code) or \
+                (uni and uni.get("ite_name")) or \
                 (item_master_map.get(orig_ite_code) or {}).get("ite_name") or orig_ite_code
-            item_name_cache[ite_code] = item_name  # cache newly created items too
+            item_name_cache[ite_code] = item_name
             invoice_items.append({
                 "item_code": ite_code,
                 "item_name": item_name,
@@ -841,6 +854,10 @@ def _run_sales_import(log_name, trc_codes=None):
     else:
         item_master_map = _load_item_master(settings.backup_file_path)
 
+    # Load unified item code map: ite_code → unified_code (authoritative ERPNext item_code)
+    from backup.epromise_migration.utils.unified_code_map import load_unified_map
+    unified_map = load_unified_map()
+
     # Pre-load in-memory caches — avoids one DB query per invoice/item
     customer_cache  = _preload_customer_cache()
     item_cache      = _preload_item_cache()
@@ -899,7 +916,7 @@ def _run_sales_import(log_name, trc_codes=None):
             try:
                 inv_dict = _build_invoice(hdr, lines, item_master_map, placeholder_code,
                                           settings, customer_cache, item_cache, item_name_cache,
-                                          sales_mappings=sales_mappings)
+                                          sales_mappings=sales_mappings, unified_map=unified_map)
                 if not inv_dict:
                     skipped += 1
                     continue

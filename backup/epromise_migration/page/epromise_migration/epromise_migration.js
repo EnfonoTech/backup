@@ -319,6 +319,10 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 		frappe.set_route("page", "epromise-docs");
 	}, { icon: "fa fa-book" });
 
+	page.add_button("📥 Excel Import (Production)", function () {
+		frappe.set_route("page", "epromise-import");
+	}, { icon: "fa fa-upload" });
+
 	// ── Seed Default Mappings ─────────────────────────────────────────────────
 	wrapper.querySelector("#btn-seed-mappings").onclick = function () {
 		const btn = this;

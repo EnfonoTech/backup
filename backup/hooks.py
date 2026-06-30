@@ -137,13 +137,16 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+    "Customer": {
+        "validate":     "backup.epromise_migration.utils.account_utils.apply_title_case",
+        "after_insert": "backup.epromise_migration.utils.account_utils.create_customer_account",
+    },
+    "Supplier": {
+        "validate":     "backup.epromise_migration.utils.account_utils.apply_title_case",
+        "after_insert": "backup.epromise_migration.utils.account_utils.create_supplier_account",
+    },
+}
 
 # Scheduled Tasks
 # ---------------
