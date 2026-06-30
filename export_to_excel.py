@@ -46,6 +46,22 @@ frappe.set_user("Administrator")
 from backup.epromise_migration.utils.unified_code_map import load_unified_map, get_erp_item_code
 _unified_map = load_unified_map()
 
+# Production warehouse (auto-created by ERPNext on company setup)
+PROD_WAREHOUSE = "Stores - SFTB"
+
+# ePromise cost centre codes → ERPNext cost center names
+_CC_MAP = {
+    "0001": "0001 - SFTB",
+    "0003": "0003 - SFTB",
+}
+
+
+def _resolve_cost_center(raw_cc):
+    """Map ePromise branch code to ERPNext cost center name."""
+    if not raw_cc:
+        return "Main - SFTB"
+    return _CC_MAP.get(str(raw_cc).strip(), raw_cc)
+
 
 def _resolve_item_code(raw_code):
     """Map a staging ERPNext item_code (= ite_code) to unified_code for production."""
@@ -155,7 +171,7 @@ P_SI = ["ID", "Series", "Customer", "Date", "Payment Due Date",
         "Debit To", "Company", "ePromise VR No", "ePromise TRC Code", "Remarks"]
 
 C_SI = ["Item (Items)", "Item Name (Items)", "Quantity (Items)", "UOM (Items)",
-        "Rate (Items)", "Amount (Items)", "Income Account (Items)", "Cost Center (Items)"]
+        "Rate (Items)", "Amount (Items)", "Warehouse (Items)", "Income Account (Items)", "Cost Center (Items)"]
 
 headers = P_SI + C_SI
 
@@ -187,7 +203,7 @@ for r in rows_raw:
                   if is_first else [""] * len(P_SI)
 
     child_vals  = [_resolve_item_code(r.item_code), r.item_name, r.qty, r.uom,
-                   r.rate, r.amount, r.income_account, r.cost_center]
+                   r.rate, r.amount, PROD_WAREHOUSE, r.income_account, _resolve_cost_center(r.cost_center)]
 
     data.append(parent_vals + child_vals)
 
@@ -203,7 +219,7 @@ P_PI = ["ID", "Series", "Supplier", "Date", "Supplier Invoice No",
         "Credit To", "Company", "ePromise VR No", "ePromise TRC Code", "Remarks"]
 
 C_PI = ["Item (Items)", "Item Name (Items)", "Accepted Qty (Items)", "UOM (Items)",
-        "Rate (Items)", "Amount (Items)", "Expense Head (Items)", "Cost Center (Items)"]
+        "Rate (Items)", "Amount (Items)", "Warehouse (Items)", "Expense Head (Items)", "Cost Center (Items)"]
 
 headers = P_PI + C_PI
 
@@ -236,7 +252,7 @@ for r in rows_raw:
                   if is_first else [""] * len(P_PI)
 
     child_vals  = [_resolve_item_code(r.item_code), r.item_name, r.qty, r.uom,
-                   r.rate, r.amount, r.expense_account, r.cost_center]
+                   r.rate, r.amount, PROD_WAREHOUSE, r.expense_account, _resolve_cost_center(r.cost_center)]
 
     data.append(parent_vals + child_vals)
 

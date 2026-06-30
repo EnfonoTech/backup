@@ -182,7 +182,7 @@ def _get_or_create_item(ite_code, item_master_map, settings, item_cache, unified
         doc = frappe.get_doc({
             "doctype": "Item", "item_code": unified_code, "item_name": item_name,
             "item_group": settings.default_item_group or "Products",
-            "stock_uom": uom, "is_stock_item": 0,
+            "stock_uom": uom, "is_stock_item": 1,
             "is_sales_item": 1, "is_purchase_item": 1, "description": item_name,
         })
         doc.insert(ignore_permissions=True)
@@ -386,6 +386,10 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
 
     expense_account = settings.default_expense_account or settings.default_income_account
 
+    # Default warehouse for stock items
+    _abbr = frappe.db.get_value("Company", settings.erpnext_company, "abbr") or "SFTB"
+    default_warehouse = getattr(settings, "default_warehouse", None) or f"Stores - {_abbr}"
+
     invoice_items = []
 
     # Stock/inventory items
@@ -405,6 +409,7 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
             "item_code": ite_code, "item_name": item_name,
             "epromise_ite_code": orig_ite,
             "qty": qty or 1, "rate": rate, "uom": uom,
+            "warehouse": default_warehouse,
             "expense_account": expense_account,
             "description": item_name,
         }

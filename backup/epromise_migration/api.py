@@ -12,6 +12,7 @@ from frappe import _
 from frappe.utils import cint, flt, getdate, now_datetime
 
 COMPANY = "Steel Force Trading Bahrain"
+ABBR    = "SFTB"
 
 SHEET_ORDER = [
     "Customers",
@@ -260,6 +261,7 @@ def _import_sales_invoice(doc_data):
             "uom":            _v(c.get("UOM (Items)")) or "Nos",
             "rate":           flt(c.get("Rate (Items)")),
             "amount":         flt(c.get("Amount (Items)")),
+            "warehouse":      _v(c.get("Warehouse (Items)")) or f"Stores - {ABBR}",
             "income_account": _v(c.get("Income Account (Items)")),
             "cost_center":    _v(c.get("Cost Center (Items)")),
         })
@@ -319,6 +321,7 @@ def _import_purchase_invoice(doc_data):
             "uom":             _v(c.get("UOM (Items)")) or "Nos",
             "rate":            flt(c.get("Rate (Items)")),
             "amount":          flt(c.get("Amount (Items)")),
+            "warehouse":       _v(c.get("Warehouse (Items)")) or f"Stores - {ABBR}",
             "expense_account": _v(c.get("Expense Head (Items)")),
             "cost_center":     _v(c.get("Cost Center (Items)")),
         })

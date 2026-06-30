@@ -249,7 +249,7 @@ def _get_or_create_item(ite_code, item_master_map, settings, item_cache, unified
             "item_name": item_name,
             "item_group": settings.default_item_group or "Products",
             "stock_uom": uom,
-            "is_stock_item": 0,
+            "is_stock_item": 1,
             "is_sales_item": 1,
             "is_purchase_item": 1,
             "description": item_name,
@@ -632,6 +632,10 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
     # Resolve customer
     customer = _get_or_create_customer(acc_code, acc_name, settings, customer_cache)
 
+    # Default warehouse for stock items
+    _abbr = frappe.db.get_value("Company", settings.erpnext_company, "abbr") or "SFTB"
+    default_warehouse = getattr(settings, "default_warehouse", None) or f"Stores - {_abbr}"
+
     # Determine invoice type, naming series, and whether this is a return
     meta = _TRC_META.get(trc_code, ("Invoice", "ACC-SINV-CR-.YYYY.-", False))
     invoice_type_label, naming_series, is_return = meta
@@ -657,6 +661,7 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
                 "qty": qty if qty else 1,
                 "rate": rate,
                 "uom": uom,
+                "warehouse": default_warehouse,
                 "income_account": settings.default_income_account,
                 "description": item_name,
             })
