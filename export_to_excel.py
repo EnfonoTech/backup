@@ -50,8 +50,10 @@ _unified_map = load_unified_map()
 PROD_WAREHOUSE = "Stores - SFTB"
 
 # ePromise cost centre codes → ERPNext cost center names
+# 0001=STEEL FORCE-SFSB, 0002=STEEL FORCE-SFWH, 0003=STEEL FORCE-SFSS
 _CC_MAP = {
     "0001": "0001 - SFTB",
+    "0002": "0002 - SFTB",
     "0003": "0003 - SFTB",
 }
 

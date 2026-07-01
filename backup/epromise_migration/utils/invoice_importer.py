@@ -372,14 +372,20 @@ def _set_doc_totals(inv, conversion_rate=1.0):
     return inv
 
 
+OUTPUT_VAT_ACCOUNT = "22040200002 - VAT Output A/c - SFTB"
+INPUT_VAT_ACCOUNT  = "13120100001 - VAT Input - SFTB"
+VAT_RATE           = 10.0
+
+
 def _get_output_tax_account(settings):
     """
     Return the output (sales) VAT account.
-    Prefers settings.default_tax_account; falls back to auto-detecting
-    a Tax-type account under Liabilities for the company.
+    Prefers settings.default_tax_account; falls back to the known SFTB account.
     """
     if settings.default_tax_account:
         return settings.default_tax_account
+    if frappe.db.exists("Account", OUTPUT_VAT_ACCOUNT):
+        return OUTPUT_VAT_ACCOUNT
     return frappe.db.get_value(
         "Account",
         {"company": settings.erpnext_company, "account_type": "Tax", "root_type": "Liability", "is_group": 0},
@@ -388,16 +394,42 @@ def _get_output_tax_account(settings):
 
 
 def _get_tax_rows(vat_amount, tax_account):
-    """Build taxes child table for a known VAT amount (actual value, not %)."""
+    """Build taxes child table. charge_type=On Net Total, rate=10%."""
     if not vat_amount or not tax_account or flt(vat_amount) == 0:
         return []
     return [{
-        "charge_type": "Actual",
+        "charge_type": "On Net Total",
         "account_head": tax_account,
         "description": "Output VAT",
+        "rate": VAT_RATE,
         "tax_amount": flt(vat_amount),
         "included_in_print_rate": 0,
     }]
+
+
+def _get_party_account_for_invoice(party_name, party_doctype, currency, company, fallback_fn):
+    """
+    Resolve the receivable/payable account for an invoice.
+    Priority:
+      1. Party Account child table (matches invoice currency if multiple rows)
+      2. fallback_fn() — currency-specific auto-detect/create
+    """
+    rows = frappe.db.get_all(
+        "Party Account",
+        filters={"parent": party_name, "parenttype": party_doctype, "company": company},
+        fields=["account"],
+    )
+    if rows:
+        accts = [r.account for r in rows if r.account]
+        if accts:
+            # Prefer currency-matching account
+            for acct in accts:
+                acct_currency = frappe.db.get_value("Account", acct, "account_currency")
+                if acct_currency == currency:
+                    return acct
+            # No currency match — return first
+            return accts[0]
+    return fallback_fn()
 
 
 # ─── data loading ─────────────────────────────────────────────────────────────
@@ -655,7 +687,8 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
     meta = _TRC_META.get(trc_code, ("Invoice", "ACC-SINV-CR-.YYYY.-", False))
     invoice_type_label, naming_series, is_return = meta
 
-    # Build item lines
+    # Build item lines — dedup by item_code (sum qty for duplicate codes)
+    _item_index = {}   # item_code → index in invoice_items
     invoice_items = []
     if lines:
         for line in lines:
@@ -669,17 +702,23 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
                 (uni and uni.get("ite_name")) or \
                 (item_master_map.get(orig_ite_code) or {}).get("ite_name") or orig_ite_code
             item_name_cache[ite_code] = item_name
-            invoice_items.append({
-                "item_code": ite_code,
-                "item_name": item_name,
-                "epromise_ite_code": orig_ite_code,
-                "qty": qty if qty else 1,
-                "rate": rate,
-                "uom": uom,
-                "warehouse": default_warehouse,
-                "income_account": settings.default_income_account,
-                "description": item_name,
-            })
+
+            if ite_code in _item_index:
+                # Merge duplicate: add qty (rate stays from first occurrence)
+                invoice_items[_item_index[ite_code]]["qty"] += qty
+            else:
+                _item_index[ite_code] = len(invoice_items)
+                invoice_items.append({
+                    "item_code": ite_code,
+                    "item_name": item_name,
+                    "epromise_ite_code": orig_ite_code,
+                    "qty": qty if qty else 1,
+                    "rate": rate,
+                    "uom": uom,
+                    "warehouse": default_warehouse,
+                    "income_account": settings.default_income_account,
+                    "description": item_name,
+                })
     else:
         is_partial = hdr.get("_partial", False)
         rate = net_amt if net_amt > 0 else acc_amt
@@ -717,6 +756,7 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
         "epromise_bill_no": bill_no,
         "set_posting_time": 1,
         "disable_rounded_total": 1,
+        "update_stock": 0,
         "is_return": 1 if is_return else 0,
     }
 
@@ -726,8 +766,11 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
     if taxes:
         inv["taxes"] = taxes
 
-    # Pick receivable account matching the invoice currency
-    inv["debit_to"] = _get_debit_account(currency, settings)
+    # Pick receivable account: prefer party's Default Accounts entry
+    inv["debit_to"] = _get_party_account_for_invoice(
+        customer, "Customer", currency, settings.erpnext_company,
+        lambda: _get_debit_account(currency, settings),
+    )
 
     # For returns: negate qty on all items and link to original invoice
     if is_return:

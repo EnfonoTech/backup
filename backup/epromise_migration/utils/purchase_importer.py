@@ -414,22 +414,6 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
             "description": item_name,
         }
 
-        # For 350: link to Purchase Receipt via REF_VR_NO using pre-loaded map
-        if trc_code == "350":
-            ref_vr = str(line.get("ref_vr_no") or "").strip()
-            if ref_vr:
-                pr_name = None
-                if grn_pr_map:
-                    pr_name = grn_pr_map.get(ref_vr)
-                if not pr_name:
-                    pr_name = frappe.db.get_value(
-                        "Purchase Receipt",
-                        {"epromise_vr_no": ref_vr, "epromise_trc_code": "GRN"},
-                        "name",
-                    )
-                if pr_name:
-                    item_row["purchase_receipt"] = pr_name
-
         invoice_items.append(item_row)
 
     # Expense service items for IP (freight, customs, etc.)
@@ -464,23 +448,28 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
             "description": f"Ref: {bill_no or vr_no} | {acc_name}",
         })
 
-    # Use input VAT account (Asset/recoverable) for purchases.
-    # Prefer settings.default_input_tax_account; fall back to auto-detecting
-    # by finding a Tax-type account under Assets for this company.
+    from backup.epromise_migration.utils.invoice_importer import (
+        INPUT_VAT_ACCOUNT, VAT_RATE, _get_party_account_for_invoice,
+    )
+    # Input VAT account (Asset/recoverable) for purchases.
     input_tax_account = getattr(settings, "default_input_tax_account", None)
     if not input_tax_account:
-        input_tax_account = frappe.db.get_value(
-            "Account",
-            {"company": settings.erpnext_company, "account_type": "Tax", "root_type": "Asset", "is_group": 0},
-            "name",
-        ) or settings.default_tax_account
+        if frappe.db.exists("Account", INPUT_VAT_ACCOUNT):
+            input_tax_account = INPUT_VAT_ACCOUNT
+        else:
+            input_tax_account = frappe.db.get_value(
+                "Account",
+                {"company": settings.erpnext_company, "account_type": "Tax", "root_type": "Asset", "is_group": 0},
+                "name",
+            ) or settings.default_tax_account
 
     taxes = []
     if vat_amt and input_tax_account and flt(vat_amt) != 0:
         taxes.append({
-            "charge_type": "Actual",
+            "charge_type": "On Net Total",
             "account_head": input_tax_account,
             "description": "Input VAT",
+            "rate": VAT_RATE,
             "tax_amount": flt(vat_amt),
         })
 
@@ -501,7 +490,10 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
         "epromise_bill_no": bill_no,
         "set_posting_time": 1,
         "disable_rounded_total": 1,
-        "credit_to": _get_payable_account(currency, settings),
+        "credit_to": _get_party_account_for_invoice(
+            supplier, "Supplier", currency, settings.erpnext_company,
+            lambda: _get_payable_account(currency, settings),
+        ),
         "is_return": 1 if is_return else 0,
         "remarks": narration,
     }

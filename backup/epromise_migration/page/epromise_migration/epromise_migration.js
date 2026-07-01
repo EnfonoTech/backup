@@ -146,28 +146,13 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 				<span id="status-sales-returns" class="ml-3 text-muted small"></span>
 			</div>
 
-			<!-- Purchase Receipt -->
-			<div class="card mb-4 p-4">
-				<h5>Step 3 — Import Purchase Receipts (GRN)</h5>
-				<p class="text-muted small">
-					TRC <strong>GRN</strong> = Goods Receiving Note → Purchase Receipt.<br>
-					TRC <strong>GR</strong> = Goods Return → Purchase Receipt (is_return=1) with link to original GRN.<br>
-					Items from <code>PURCHASE_DATA</code>. <strong>Run this before Step 4.</strong>
-				</p>
-				<button class="btn btn-primary btn-sm" id="btn-import-receipts">
-					Import Purchase Receipts
-				</button>
-				<span id="status-receipts" class="ml-3 text-muted small"></span>
-			</div>
-
 			<!-- Purchase Invoice Import -->
 			<div class="card mb-4 p-4">
-				<h5>Step 4 — Import Purchase Invoices</h5>
+				<h5>Step 3 — Import Purchase Invoices</h5>
 				<p class="text-muted small">
-					TRC <strong>350</strong> = Purchase Invoice Item Wise → Purchase Invoice linked to GRN Receipt (items from <code>PURCHASE_INVOICE_DETAIL</code>).<br>
+					TRC <strong>350</strong> = Purchase Invoice Item Wise → Purchase Invoice (items from <code>PURCHASE_INVOICE_DETAIL</code>).<br>
 					TRC <strong>111</strong> = Direct Purchase → standalone Purchase Invoice.<br>
-					TRC <strong>IP</strong> = Import Purchase → Purchase Invoice with freight/customs as service items.<br>
-					Run after Step 3 so GRN receipts are already in ERPNext.
+					TRC <strong>IP</strong> = Import Purchase → Purchase Invoice with freight/customs as service items.
 				</p>
 				<button class="btn btn-primary btn-sm" id="btn-import-purchases">
 					Import Purchase Invoices
@@ -177,7 +162,7 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 
 			<!-- Purchase Returns -->
 			<div class="card mb-4 p-4">
-				<h5>Step 4b — Import Purchase Returns</h5>
+				<h5>Step 3b — Import Purchase Returns</h5>
 				<p class="text-muted small">
 					TRC <strong>PR</strong> = Purchase Return → Purchase Invoice (is_return=1) with link to original invoice. Run after Step 4.
 				</p>
@@ -295,7 +280,6 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 			["status-items",           "Item",             "epromise_ite_code",  null,   "Item"],
 			["status-invoices",        "Sales Invoice",    "epromise_trc_code",  ["S01","S06"], "Sales Invoice"],
 			["status-sales-returns",   "Sales Invoice",    "epromise_trc_code",  ["R01","R04"], "Sales Return"],
-			["status-receipts",        "Purchase Receipt", "epromise_trc_code",  ["GRN","GR"],  "Purchase Receipt"],
 			["status-purchases",       "Purchase Invoice", "epromise_trc_code",  ["350","111","IP"], "Purchase Invoice"],
 			["status-purchase-returns","Purchase Invoice", "epromise_trc_code",  ["PR"], "Purchase Return"],
 			["status-payments",        "Payment Entry",    "epromise_trc_code",  ["003","004"], "Payment Entry"],
@@ -528,13 +512,6 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 		);
 	};
 
-	wrapper.querySelector("#btn-import-receipts").onclick = function () {
-		run_import(
-			"backup.epromise_migration.utils.receipt_importer.import_purchase_receipts",
-			this, wrapper.querySelector("#status-receipts")
-		);
-	};
-
 	wrapper.querySelector("#btn-import-purchases").onclick = function () {
 		run_import(
 			"backup.epromise_migration.utils.purchase_importer.import_purchase_invoices",
@@ -586,9 +563,8 @@ frappe.pages["epromise-migration"].on_page_load = function (wrapper) {
 					["1b — Import Supplier",  badge(m.suppliers_epromise||0, "suppliers")],
 					["2 — Import Sales Inv",  badge((s.s01||0)+(s.s06||0), "invoices")],
 					["2b — Import Sales Ret", badge((s.r01||0)+(s.r04||0), "returns")],
-					["3 — Import Purchase Re",badge((pr.grn||0)+(pr.gr||0), "receipts")],
-					["4 — Import Purchase In",badge((pi["350"]||0)+(pi["111"]||0)+(pi.ip||0), "invoices")],
-					["4b — Import Purchase R",badge(pi.pr||0, "returns")],
+					["3 — Import Purchase In",badge((pi["350"]||0)+(pi["111"]||0)+(pi.ip||0), "invoices")],
+					["3b — Import Purchase R",badge(pi.pr||0, "returns")],
 					["5 — Import Payment",    badge((pe["003"]||0)+(pe["004"]||0), "entries")],
 					["6 — Import Journal",    badge((je["007"]||0)+(je["020"]||0), "entries")],
 				];

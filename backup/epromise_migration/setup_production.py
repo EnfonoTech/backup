@@ -126,8 +126,8 @@ def setup_warehouse():
 def setup_cost_center():
     """
     Create ePromise branch cost centres.
-    ePromise uses codes 0001 and 0003 — these become '0001 - SFTB' in ERPNext.
-    All imported SI items reference one of these two cost centres.
+    ePromise codes: 0001=STEEL FORCE-SFSB, 0002=STEEL FORCE-SFWH, 0003=STEEL FORCE-SFSS.
+    These become '0001 - SFTB', '0002 - SFTB', '0003 - SFTB' in ERPNext.
     """
     print("\n[3] Cost Centers")
     root_cc = f"{COMPANY} - {ABBR}"
@@ -138,8 +138,9 @@ def setup_cost_center():
 
     # ePromise branch codes → ERPNext cost center names
     epromise_branches = [
-        ("0001", "Branch 0001"),
-        ("0003", "Branch 0003"),
+        ("0001", "Branch 0001 (SFSB)"),
+        ("0002", "Branch 0002 (SFWH)"),
+        ("0003", "Branch 0003 (SFSS)"),
         ("Main", "Main"),
     ]
     for code, label in epromise_branches:
