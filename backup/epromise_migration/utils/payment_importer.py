@@ -13,6 +13,7 @@ Also handles:
 import frappe
 from frappe.utils import now_datetime, flt, getdate
 from backup.epromise_migration.utils.bak_parser import connect_mssql
+from backup.epromise_migration.utils.gl_map import load_gl_map, resolve_account
 
 CASH_PAYMENT_TRC  = ("003",)   # Cash Payment Voucher → Payment Entry (Pay) or Journal
 CASH_RECEIPT_TRC  = ("004",)   # Cash Receipt Voucher → Payment Entry (Receive)
@@ -44,12 +45,25 @@ def _ensure_custom_fields():
 
 
 def _preload_account_cache(company):
-    """Return {epromise_acc_code: erpnext_account_name} using account_number field."""
+    """
+    Build account lookup: {epromise_code: erpnext_account_name}.
+    Priority order per code:
+      1. GL Mapping Excel (explicit cross-mapping for codes that changed in ERPNext)
+      2. account_number field match in tabAccount (when code stayed the same)
+    """
+    # 1. GL mapping Excel (authoritative)
+    cache = dict(load_gl_map())   # str(ep_code) → full ERPNext account name
+
+    # 2. account_number field in ERPNext (fill gaps not in the GL map)
     rows = frappe.db.sql("""
         SELECT account_number, name FROM `tabAccount`
         WHERE company=%s AND COALESCE(account_number,'') != ''
     """, company, as_dict=True)
-    return {r.account_number: r.name for r in rows}
+    for r in rows:
+        if r.account_number not in cache:
+            cache[r.account_number] = r.name
+
+    return cache
 
 
 def _get_default_cash_account(company):
@@ -63,11 +77,11 @@ def _get_default_cash_account(company):
 def _get_account_for_payment(acc_code, account_cache, company, settings):
     """
     Resolve an ePromise acc_code to an ERPNext account name.
-    Priority: account_number match → settings default → first Cash/Bank account.
+    Priority: GL map / account_number match → settings default → first Cash/Bank account.
     """
     if not acc_code:
         return None
-    found = account_cache.get(acc_code)
+    found = account_cache.get(str(acc_code).strip())
     if found:
         return found
     # Fall back to default cash account from settings or auto-detect

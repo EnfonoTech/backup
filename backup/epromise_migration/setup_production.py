@@ -121,6 +121,52 @@ def setup_warehouse():
     return primary
 
 
+def setup_branch_warehouses():
+    """
+    Create branch warehouses matching the ePromise cost centres:
+      0001 - SFTB  (STEEL FORCE-SFSB)
+      0002 - SFTB  (STEEL FORCE-SFWH)
+      0003 - SFTB  (STEEL FORCE-SFSS)
+
+    These are used in invoice item lines so stock moves to the correct
+    branch location (mirroring the cost centre mapping).
+    Parent: Stores - SFTB (must exist first).
+    """
+    print("\n[2b] Branch Warehouses")
+    parent_wh = f"Stores - {ABBR}"
+
+    # Ensure parent is a group so children can be added
+    if frappe.db.exists("Warehouse", parent_wh):
+        is_grp = frappe.db.get_value("Warehouse", parent_wh, "is_group")
+        if not is_grp:
+            frappe.db.set_value("Warehouse", parent_wh, "is_group", 1)
+            frappe.db.commit()
+            print(f"  UPDATED  {parent_wh} → is_group = 1")
+    else:
+        print(f"  WARN  Parent warehouse '{parent_wh}' not found — run setup_warehouse() first")
+        return
+
+    branches = [
+        ("0001", "STEEL FORCE-SFSB"),
+        ("0002", "STEEL FORCE-SFWH"),
+        ("0003", "STEEL FORCE-SFSS"),
+    ]
+    for code, label in branches:
+        wh_name = f"{code} - {ABBR}"
+        doc, created = _exists_or_create(
+            "Warehouse",
+            wh_name,
+            {
+                "warehouse_name": code,
+                "company": COMPANY,
+                "parent_warehouse": parent_wh,
+                "warehouse_detail": label,
+                "is_group": 0,
+            },
+        )
+        _log(f"Warehouse ({label})", wh_name, created)
+
+
 # ─── 3. Cost Centre ───────────────────────────────────────────────────────────
 
 def setup_cost_center():
@@ -490,6 +536,65 @@ def check_coa_accounts():
         print(f"\n  All critical accounts present.")
 
 
+# ─── 13. Remove duplicate ERPNext default COA root groups ────────────────────
+
+def remove_duplicate_coa():
+    """
+    ERPNext auto-creates generic root account groups when a company is first set up.
+    If a custom numbered COA (1-Asset, 2-Liabilities, etc.) was imported afterwards,
+    the default groups become empty duplicates.  This function deletes them.
+
+    Safe to run multiple times — skips groups that don't exist or still have children.
+
+    Execute standalone:
+        bench --site [site] execute backup.epromise_migration.setup_production.remove_duplicate_coa
+    """
+    print("\n[13] Remove duplicate ERPNext default COA root groups")
+
+    default_roots = [
+        "Application of Funds (Assets)",
+        "Source of Funds (Liabilities)",
+        "Equity",
+        "Income",
+        "Expenses",
+        # ERPNext sometimes also creates these variants:
+        "Current Assets",
+        "Current Liabilities",
+        "Fixed Assets",
+        "Reserves and Surplus",
+    ]
+
+    deleted = 0
+    for root_name in default_roots:
+        full_name = f"{root_name} - {ABBR}"
+        if not frappe.db.exists("Account", full_name):
+            continue
+
+        children = frappe.db.count("Account", {"parent_account": full_name})
+        gl_entries = frappe.db.count("GL Entry", {"account": full_name})
+
+        if children > 0:
+            print(f"  SKIP    {full_name}  ({children} child accounts — remove children first)")
+            continue
+        if gl_entries > 0:
+            print(f"  SKIP    {full_name}  ({gl_entries} GL entries — cannot delete)")
+            continue
+
+        try:
+            frappe.delete_doc("Account", full_name, ignore_permissions=True, force=True)
+            frappe.db.commit()
+            print(f"  DELETED {full_name}")
+            deleted += 1
+        except Exception as e:
+            frappe.db.rollback()
+            print(f"  ERROR   {full_name}: {e}")
+
+    if deleted == 0:
+        print("  Nothing to delete (all groups either absent, have children, or have GL entries)")
+    else:
+        print(f"\n  Removed {deleted} duplicate root group(s). Reload the COA page to verify.")
+
+
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
 def run_setup():
@@ -511,6 +616,7 @@ def run_setup():
 
     setup_periodic_inventory()
     setup_warehouse()
+    setup_branch_warehouses()
     setup_cost_center()
     setup_item_groups()
     setup_uoms()

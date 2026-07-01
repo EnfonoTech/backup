@@ -44,14 +44,22 @@ frappe.set_user("Administrator")
 # The current item_code in ERPNext SI/PI items IS the ite_code.
 # For ~170 items, unified_code differs — use it as the authoritative ERPNext item_code.
 from backup.epromise_migration.utils.unified_code_map import load_unified_map, get_erp_item_code
+from backup.epromise_migration.utils.gl_map import load_gl_map, resolve_account
 _unified_map = load_unified_map()
+_gl_map = load_gl_map()
+print(f"  [GL map] Loaded {len(_gl_map):,} account mappings")
 
-# Production warehouse (auto-created by ERPNext on company setup)
-PROD_WAREHOUSE = "Stores - SFTB"
+# Default fallback warehouse when no branch code is present
+_DEFAULT_WAREHOUSE = "Stores - SFTB"
 
-# ePromise cost centre codes → ERPNext cost center names
+# ePromise branch codes → ERPNext cost center + warehouse names
 # 0001=STEEL FORCE-SFSB, 0002=STEEL FORCE-SFWH, 0003=STEEL FORCE-SFSS
 _CC_MAP = {
+    "0001": "0001 - SFTB",
+    "0002": "0002 - SFTB",
+    "0003": "0003 - SFTB",
+}
+_WH_MAP = {
     "0001": "0001 - SFTB",
     "0002": "0002 - SFTB",
     "0003": "0003 - SFTB",
@@ -59,17 +67,111 @@ _CC_MAP = {
 
 
 def _resolve_cost_center(raw_cc):
-    """Map ePromise branch code to ERPNext cost center name."""
+    """Map ePromise branch / ERPNext cost center to production cost center name."""
     if not raw_cc:
         return "Main - SFTB"
-    return _CC_MAP.get(str(raw_cc).strip(), raw_cc)
+    key = str(raw_cc).strip()
+    # raw_cc may already be a full ERPNext name like "0001 - SFTB"
+    short = key.split(" - ")[0].zfill(4)
+    return _CC_MAP.get(short, key)
+
+
+def _resolve_warehouse(raw_cc):
+    """Map ePromise branch / ERPNext cost center to the matching branch warehouse."""
+    if not raw_cc:
+        return _DEFAULT_WAREHOUSE
+    key = str(raw_cc).strip()
+    short = key.split(" - ")[0].zfill(4)
+    return _WH_MAP.get(short, _DEFAULT_WAREHOUSE)
+
+
+_PLACEHOLDER_ITEM = "ePromise-Import-Item"
+
+
+def _resolve_gl_account(raw_account):
+    """
+    Map a staging ERPNext account name to the final production account name
+    using the GL Mapping Excel.  Falls back to raw_account when not in the map.
+    The staging account name may be stored as the account number or as a partial
+    name; try the GL map with just the account_number prefix first.
+    """
+    if not raw_account:
+        return raw_account
+    # Already a full name like "13020100001 - National Bank of Bahrain - SFTB" — pass through
+    mapped = resolve_account(raw_account, _gl_map)
+    if mapped:
+        return mapped
+    # Try the numeric prefix before the first " - "
+    prefix = raw_account.split(" - ")[0].strip()
+    mapped = resolve_account(prefix, _gl_map)
+    return mapped if mapped else raw_account
 
 
 def _resolve_item_code(raw_code):
-    """Map a staging ERPNext item_code (= ite_code) to unified_code for production."""
+    """
+    Map staging item_code to the unified_code from the Bahrain Master XLS.
+    Items not in the master (no unified mapping) → placeholder item.
+    Never passes raw resource codes to production.
+    """
     if not raw_code:
-        return raw_code
-    return get_erp_item_code(str(raw_code), _unified_map)
+        return _PLACEHOLDER_ITEM
+    entry = _unified_map.get(str(raw_code))
+    if entry:
+        return entry["unified_code"]
+    return _PLACEHOLDER_ITEM
+
+
+def _load_epromise_branch_map():
+    """
+    Connect to ePromise SQL and return {(trc_code, vr_no): '0001'/'0002'/'0003'}
+    so each invoice line gets the correct branch warehouse/cost center.
+    Falls back to {} if CC_NO doesn't exist or connection fails.
+    """
+    try:
+        from backup.epromise_migration.utils.bak_parser import connect_mssql
+        settings = frappe.get_doc("ePromise Settings", "ePromise Settings")
+        conn = connect_mssql(settings)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT TRC_CODE, VR_NO, SOURCE_BR_CODE FROM DICHDATA WHERE POSTED_IND='Y'"
+            )
+        except Exception:
+            conn.close()
+            print("  [ePromise SQL] SOURCE_BR_CODE column not found — warehouse defaults to Stores - SFTB")
+            return {}
+        result = {}
+        for row in cur:
+            d = {k.lower(): v for k, v in dict(row).items()}
+            key = (
+                str(d.get("trc_code") or "").strip(),
+                str(d.get("vr_no")   or "").strip(),
+            )
+            raw = str(d.get("source_br_code") or "").strip()
+            if raw:
+                result[key] = raw.zfill(4)   # normalise → "0001"
+        conn.close()
+        print(f"  [ePromise SQL] Branch map loaded: {len(result):,} invoice entries")
+        return result
+    except Exception as e:
+        print(f"  [ePromise SQL] Branch map unavailable ({e}) — warehouse defaults to Stores - SFTB")
+        return {}
+
+
+_branch_map = _load_epromise_branch_map()
+
+
+def _branch_warehouse(trc_code, vr_no):
+    """Return branch warehouse for an invoice, falling back to Stores - SFTB."""
+    cc = _branch_map.get((str(trc_code or "").strip(), str(vr_no or "").strip()))
+    return _WH_MAP.get(cc, _DEFAULT_WAREHOUSE) if cc else _DEFAULT_WAREHOUSE
+
+
+def _branch_cost_center(trc_code, vr_no):
+    """Return branch cost center for an invoice, falling back to Main - SFTB."""
+    cc = _branch_map.get((str(trc_code or "").strip(), str(vr_no or "").strip()))
+    return _CC_MAP.get(cc, "Main - SFTB") if cc else "Main - SFTB"
+
 
 TODAY    = datetime.date.today().strftime("%Y-%m-%d")
 OUT_FILE = f"/home/gym/new-bench/apps/backup/epromise_export_SFTB_{TODAY}.xlsx"
@@ -177,14 +279,22 @@ C_SI = ["Item (Items)", "Item Name (Items)", "Quantity (Items)", "UOM (Items)",
 
 headers = P_SI + C_SI
 
-# Fetch all items joined to their parent invoice
+# Fetch all items joined to their parent invoice.
+# debit_to: prefer the customer's party account over the generic AR control account.
 rows_raw = q("""
     SELECT
         si.name, si.naming_series, si.customer, si.posting_date, si.due_date,
         si.currency, si.conversion_rate, si.is_return, si.return_against,
-        si.debit_to, si.company, si.epromise_vr_no, si.epromise_trc_code, si.remarks,
+        COALESCE(
+            (SELECT pa.account FROM `tabParty Account` pa
+             WHERE pa.parent = si.customer AND pa.parenttype = 'Customer'
+               AND pa.company = si.company
+             ORDER BY pa.idx LIMIT 1),
+            si.debit_to
+        ) AS debit_to,
+        si.company, si.epromise_vr_no, si.epromise_trc_code, si.remarks,
         sii.item_code, sii.item_name, sii.qty, sii.uom,
-        sii.rate, sii.amount, sii.income_account, sii.cost_center,
+        sii.rate, sii.amount, sii.income_account,
         sii.idx
     FROM `tabSales Invoice` si
     LEFT JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
@@ -204,8 +314,10 @@ for r in rows_raw:
                    r.debit_to, r.company, r.epromise_vr_no, r.epromise_trc_code, r.remarks] \
                   if is_first else [""] * len(P_SI)
 
-    child_vals  = [_resolve_item_code(r.item_code), r.item_name, r.qty, r.uom,
-                   r.rate, r.amount, PROD_WAREHOUSE, r.income_account, _resolve_cost_center(r.cost_center)]
+    wh = _branch_warehouse(r.epromise_trc_code, r.epromise_vr_no)
+    cc = _branch_cost_center(r.epromise_trc_code, r.epromise_vr_no)
+    child_vals = [_resolve_item_code(r.item_code), r.item_name, r.qty, r.uom,
+                  r.rate, r.amount, wh, _resolve_gl_account(r.income_account), cc]
 
     data.append(parent_vals + child_vals)
 
@@ -230,9 +342,16 @@ rows_raw = q("""
         pi.name, pi.naming_series, pi.supplier, pi.posting_date,
         pi.bill_no, pi.bill_date, pi.due_date,
         pi.currency, pi.conversion_rate, pi.is_return, pi.return_against,
-        pi.credit_to, pi.company, pi.epromise_vr_no, pi.epromise_trc_code, pi.remarks,
+        COALESCE(
+            (SELECT pa.account FROM `tabParty Account` pa
+             WHERE pa.parent = pi.supplier AND pa.parenttype = 'Supplier'
+               AND pa.company = pi.company
+             ORDER BY pa.idx LIMIT 1),
+            pi.credit_to
+        ) AS credit_to,
+        pi.company, pi.epromise_vr_no, pi.epromise_trc_code, pi.remarks,
         pii.item_code, pii.item_name, pii.qty, pii.uom,
-        pii.rate, pii.amount, pii.expense_account, pii.cost_center,
+        pii.rate, pii.amount, pii.expense_account,
         pii.idx
     FROM `tabPurchase Invoice` pi
     LEFT JOIN `tabPurchase Invoice Item` pii ON pii.parent = pi.name
@@ -253,8 +372,10 @@ for r in rows_raw:
                    r.credit_to, r.company, r.epromise_vr_no, r.epromise_trc_code, r.remarks] \
                   if is_first else [""] * len(P_PI)
 
-    child_vals  = [_resolve_item_code(r.item_code), r.item_name, r.qty, r.uom,
-                   r.rate, r.amount, PROD_WAREHOUSE, r.expense_account, _resolve_cost_center(r.cost_center)]
+    wh = _branch_warehouse(r.epromise_trc_code, r.epromise_vr_no)
+    cc = _branch_cost_center(r.epromise_trc_code, r.epromise_vr_no)
+    child_vals = [_resolve_item_code(r.item_code), r.item_name, r.qty, r.uom,
+                  r.rate, r.amount, wh, _resolve_gl_account(r.expense_account), cc]
 
     data.append(parent_vals + child_vals)
 
@@ -300,7 +421,7 @@ for r in rows_raw:
 
     parent_vals = [r.name, r.naming_series, r.payment_type, r.party_type, r.party,
                    r.posting_date, r.paid_amount, r.received_amount,
-                   r.paid_from, r.paid_to, r.mode_of_payment,
+                   _resolve_gl_account(r.paid_from), _resolve_gl_account(r.paid_to), r.mode_of_payment,
                    r.reference_no, r.reference_date,
                    r.company, r.epromise_vr_no, r.remarks] \
                   if is_first else [""] * len(P_PE)
@@ -351,7 +472,7 @@ for r in rows_raw:
                    r.company, r.epromise_vr_no, r.user_remark] \
                   if is_first else [""] * len(P_JE)
 
-    child_vals  = [r.account, r.debit_in_account_currency, r.credit_in_account_currency,
+    child_vals  = [_resolve_gl_account(r.account), r.debit_in_account_currency, r.credit_in_account_currency,
                    r.party_type, r.party, r.cost_center, r.line_remark]
 
     data.append(parent_vals + child_vals)

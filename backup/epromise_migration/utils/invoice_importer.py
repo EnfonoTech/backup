@@ -216,15 +216,21 @@ def _get_or_create_customer(acc_code, acc_name, settings, customer_cache):
 
 def _get_or_create_item(ite_code, item_master_map, settings, item_cache, unified_map=None):
     """
-    Return ERPNext item_code (= unified_code), auto-creating the Item if needed.
-    unified_map: {str(ite_code): {unified_code, ite_name, ite_unit}} from unified_code_map.py
+    Return ERPNext item_code (always a unified_code from the Bahrain Master XLS).
+    If the resource code has no unified_code mapping, returns the placeholder item —
+    never creates an item using the raw ePromise resource code.
     """
-    if not ite_code:
-        return settings.placeholder_item_code or "ePromise-Import-Item"
+    placeholder = settings.placeholder_item_code or "ePromise-Import-Item"
 
-    # Resolve: unified_code is the authoritative ERPNext item_code
+    if not ite_code:
+        return placeholder
+
+    # Must exist in Bahrain Master XLS unified map — no fallback to raw resource code
     uni = (unified_map or {}).get(str(ite_code))
-    unified_code = uni["unified_code"] if uni else str(ite_code)
+    if not uni:
+        return placeholder
+
+    unified_code = uni["unified_code"]
 
     if unified_code in item_cache:
         return unified_code
@@ -233,14 +239,9 @@ def _get_or_create_item(ite_code, item_master_map, settings, item_cache, unified
         item_cache.add(unified_code)
         return unified_code
 
-    # Name + UOM: prefer unified_map (more authoritative), fallback to DICIHMAS
-    if uni and uni.get("ite_name"):
-        item_name = uni["ite_name"]
-        uom = _ensure_uom(_map_uom(uni.get("ite_unit") or "NOS"))
-    else:
-        master = item_master_map.get(str(ite_code), {})
-        item_name = (master.get("ite_name") or unified_code).strip()
-        uom = _ensure_uom(_map_uom(master.get("base_uom") or "NOS"))
+    # Create item using name + UOM from Bahrain Master
+    item_name = (uni.get("ite_name") or unified_code).strip()
+    uom = _ensure_uom(_map_uom(uni.get("ite_unit") or "NOS"))
 
     try:
         doc = frappe.get_doc({
@@ -375,6 +376,37 @@ def _set_doc_totals(inv, conversion_rate=1.0):
 OUTPUT_VAT_ACCOUNT = "22040200002 - VAT Output A/c - SFTB"
 INPUT_VAT_ACCOUNT  = "13120100001 - VAT Input - SFTB"
 VAT_RATE           = 10.0
+
+# ePromise branch code → ERPNext cost center / warehouse
+# 0001=STEEL FORCE-SFSB, 0002=STEEL FORCE-SFWH, 0003=STEEL FORCE-SFSS
+_CC_MAP = {
+    "0001": "0001 - SFTB",
+    "0002": "0002 - SFTB",
+    "0003": "0003 - SFTB",
+}
+_WH_MAP = {
+    "0001": "0001 - SFTB",
+    "0002": "0002 - SFTB",
+    "0003": "0003 - SFTB",
+}
+
+
+def _resolve_branch(hdr, default_cc, default_wh):
+    """
+    Read the branch code from the ePromise header dict and return
+    (cost_center, warehouse).  Falls back to supplied defaults when no branch
+    code is present or is not one of the three known branches.
+
+    ePromise stores the branch in SOURCE_BR_CODE (DICHDATA column).
+    """
+    raw = (
+        str(hdr.get("source_br_code") or hdr.get("cc_no") or "")
+        .strip()
+        .zfill(4)               # normalise to 4-digit string e.g. "0001"
+    )
+    cost_center = _CC_MAP.get(raw, default_cc)
+    warehouse   = _WH_MAP.get(raw, default_wh)
+    return cost_center, warehouse
 
 
 def _get_output_tax_account(settings):
@@ -679,9 +711,13 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
     # Resolve customer
     customer = _get_or_create_customer(acc_code, acc_name, settings, customer_cache)
 
-    # Default warehouse for stock items
+    # Default warehouse and cost center (overridden per-invoice by branch code)
     _abbr = frappe.db.get_value("Company", settings.erpnext_company, "abbr") or "SFTB"
     default_warehouse = getattr(settings, "default_warehouse", None) or f"Stores - {_abbr}"
+    default_cc = getattr(settings, "default_cost_center", None) or f"Main - {_abbr}"
+
+    # Resolve branch → cost center + warehouse from ePromise CC_NO / BRANCH_NO
+    cost_center, branch_warehouse = _resolve_branch(hdr, default_cc, default_warehouse)
 
     # Determine invoice type, naming series, and whether this is a return
     meta = _TRC_META.get(trc_code, ("Invoice", "ACC-SINV-CR-.YYYY.-", False))
@@ -715,7 +751,8 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
                     "qty": qty if qty else 1,
                     "rate": rate,
                     "uom": uom,
-                    "warehouse": default_warehouse,
+                    "warehouse": branch_warehouse,
+                    "cost_center": cost_center,
                     "income_account": settings.default_income_account,
                     "description": item_name,
                 })

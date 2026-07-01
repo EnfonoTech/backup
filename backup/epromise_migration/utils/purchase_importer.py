@@ -17,6 +17,7 @@ from backup.epromise_migration.utils.bak_parser import connect_mssql
 from backup.epromise_migration.utils.invoice_importer import (
     UOM_MAP, _map_uom, _ensure_uom, _ensure_placeholder_item,
     _load_item_master_live, _preload_item_cache, _preload_item_name_cache,
+    _resolve_branch,
 )
 
 # GRN/GR removed — they go to receipt_importer.py → Purchase Receipt
@@ -386,9 +387,13 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
 
     expense_account = settings.default_expense_account or settings.default_income_account
 
-    # Default warehouse for stock items
+    # Default warehouse and cost center (overridden per-invoice by branch code)
     _abbr = frappe.db.get_value("Company", settings.erpnext_company, "abbr") or "SFTB"
     default_warehouse = getattr(settings, "default_warehouse", None) or f"Stores - {_abbr}"
+    default_cc = getattr(settings, "default_cost_center", None) or f"Main - {_abbr}"
+
+    # Resolve branch → cost center + warehouse from ePromise CC_NO / BRANCH_NO
+    cost_center, branch_warehouse = _resolve_branch(hdr, default_cc, default_warehouse)
 
     invoice_items = []
 
@@ -409,7 +414,8 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
             "item_code": ite_code, "item_name": item_name,
             "epromise_ite_code": orig_ite,
             "qty": qty or 1, "rate": rate, "uom": uom,
-            "warehouse": default_warehouse,
+            "warehouse": branch_warehouse,
+            "cost_center": cost_center,
             "expense_account": expense_account,
             "description": item_name,
         }
