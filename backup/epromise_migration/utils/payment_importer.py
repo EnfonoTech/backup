@@ -63,6 +63,27 @@ def _preload_account_cache(company):
         if r.account_number not in cache:
             cache[r.account_number] = r.name
 
+    # 3. Party ledgers: map ePromise party codes (Receivable 1303* / Payable 2201*) to
+    #    their ERPNext per-party ledger via the ePromise account master (DICADMAS) name.
+    #    Without this, party codes absent from the GL map fall back to the default cash
+    #    account and payments get mis-posted to the bank instead of the supplier/customer.
+    try:
+        _settings = _get_settings()
+        if getattr(_settings, "mssql_host", None):
+            _conn = connect_mssql(_settings); _cur = _conn.cursor()
+            _cur.execute("SELECT ACC_CODE, ACC_NAME FROM DICADMAS WHERE ACC_CODE LIKE '1303%' OR ACC_CODE LIKE '2201%'")
+            _adm = {str(row["ACC_CODE"]).strip(): (row["ACC_NAME"] or "").strip() for row in _cur.fetchall()}
+            _conn.close()
+            _byname = {}
+            for a in frappe.get_all("Account", filters={"company": company, "is_group": 0}, fields=["name", "account_name"]):
+                _byname[(a.account_name or "").strip().lower()] = a.name
+            for _code, _nm in _adm.items():
+                _led = _byname.get(_nm.lower())
+                if _led:
+                    cache[_code] = _led   # authoritative for party codes
+    except Exception as _e:
+        frappe.log_error(str(_e)[:200], "party cache preload")
+
     return cache
 
 
@@ -124,7 +145,7 @@ def _iter_vouchers(settings, trc_codes):
     hdrs = {}
     for r in cur:
         row = {k.lower(): v for k, v in dict(r).items()}
-        hdrs[str(row["vr_no"])] = row
+        hdrs[(row["trc_code"], str(row["vr_no"]))] = row
 
     from collections import defaultdict
 
@@ -136,7 +157,7 @@ def _iter_vouchers(settings, trc_codes):
     )
     for r in cur:
         row = {k.lower(): v for k, v in dict(r).items()}
-        gl_map[str(row["vr_no"])].append(row)
+        gl_map[(row["trc_code"], str(row["vr_no"]))].append(row)
 
     # DICSDATA: bill settlement table — party account + exact invoice being paid
     bill_map = defaultdict(list)
@@ -150,11 +171,11 @@ def _iter_vouchers(settings, trc_codes):
     )
     for r in cur:
         row = {k.lower(): v for k, v in dict(r).items()}
-        bill_map[str(row["vr_no"])].append(row)
+        bill_map[(row["trc_code"], str(row["vr_no"]))].append(row)
 
     conn.close()
-    for vr_no, hdr in hdrs.items():
-        yield hdr, gl_map.get(vr_no, []), bill_map.get(vr_no, [])
+    for _key, hdr in hdrs.items():
+        yield hdr, gl_map.get(_key, []), bill_map.get(_key, [])
 
 
 # ─── Payment Entry builder ─────────────────────────────────────────────────────
@@ -333,7 +354,9 @@ def _build_payment_entry_from_dicsdata(hdr, bill_rows, gl_lines, settings, accou
             return None
         payment_type = "Pay"
         paid_from = cash_erpnext
-        paid_to   = default_payable or settings.default_payable_account or \
+        paid_to   = frappe.db.get_value("Party Account",
+                        {"parent": party, "parenttype": "Supplier", "company": company}, "account") \
+                    or default_payable or settings.default_payable_account or \
                     frappe.db.get_value("Account", {"company": company, "account_type": "Payable", "is_group": 0}, "name")
         party_type  = "Supplier"
         inv_doctype = "Purchase Invoice"
@@ -342,7 +365,9 @@ def _build_payment_entry_from_dicsdata(hdr, bill_rows, gl_lines, settings, accou
         if not party:
             return None
         payment_type = "Receive"
-        paid_from = default_receivable or settings.default_debit_account or \
+        paid_from = frappe.db.get_value("Party Account",
+                        {"parent": party, "parenttype": "Customer", "company": company}, "account") \
+                    or default_receivable or settings.default_debit_account or \
                     frappe.db.get_value("Account", {"company": company, "account_type": "Receivable", "is_group": 0}, "name")
         paid_to   = cash_erpnext
         party_type  = "Customer"
@@ -392,52 +417,47 @@ def _build_cash_receipt_entry(hdr, gl_lines, settings, account_cache, conn=None,
 
 
 def _build_journal_entry_from_voucher(hdr, gl_lines, settings, account_cache, default_cash=None):
-    """Build a Journal Entry from voucher header + GL lines."""
+    """Build a Journal Entry from voucher header + GL lines.
+    Amounts use report_amt (BHD base) — NEVER acc_amt (the foreign transaction amount),
+    which otherwise inflates every foreign-currency (SAR/USD/AED) voucher."""
     trc_code   = hdr.get("trc_code", "")
     vr_no      = str(hdr.get("vr_no") or "").strip()
-    currency   = (hdr.get("cur_code") or "BHD").strip()
+    currency   = "BHD"
     narration  = (hdr.get("particulars") or "").strip()
     acc_code   = (hdr.get("acc_code") or "").strip()
-    amount     = flt(hdr.get("acc_amt") or 0)
+
+    def _bhd(row):
+        if not row:
+            return 0.0
+        for k in ("report_amt", "local_cur_amt", "acc_amt"):
+            v = row.get(k)
+            if v is not None and flt(v) != 0:
+                return flt(v)
+        return 0.0
 
     try:
         posting_date = getdate(str(hdr.get("vr_date") or "")[:10])
     except Exception:
         posting_date = getdate("2024-01-01")
-
     if not vr_no:
         return None
 
     company = settings.erpnext_company
+    _cash = default_cash or _get_default_cash_account(company)
     accounts = []
 
-    # Use cached default cash — no DB query unless account_cache has a specific match
-    _cash = default_cash or _get_default_cash_account(company)
-    hdr_account = account_cache.get(acc_code) or _cash
-    if hdr_account and amount:
-        # For payment (003): cash goes out → Credit
-        # For receipt (004): cash comes in → Debit
-        is_receipt = trc_code in CASH_RECEIPT_TRC
-        accounts.append({
-            "account": hdr_account,
-            "debit_in_account_currency":  amount if is_receipt else 0,
-            "credit_in_account_currency": 0 if is_receipt else amount,
-            "account_currency": currency,
-            "user_remark": narration or f"ePromise {trc_code}/{vr_no}",
-        })
-
-    # GL detail lines
-    for gl in gl_lines:
+    # Build entirely from the source GL lines (DICADDATA); each carries its own sign and
+    # report_amt (BHD). This is the complete, balanced set for a posted voucher.
+    for gl in (gl_lines or []):
         gl_acc_code = (gl.get("acc_code") or "").strip()
-        if gl_acc_code == acc_code:
-            continue  # skip the header account duplicate
         gl_account = account_cache.get(gl_acc_code) or _cash
         if not gl_account:
             continue
-        gl_amt  = flt(gl.get("acc_amt") or 0)
+        gl_amt = _bhd(gl)
+        if gl_amt == 0:
+            continue
         gl_sign = str(gl.get("acc_sign") or "1")
         gl_part = (gl.get("particulars") or narration or "").strip()
-
         if flt(gl_sign) >= 0:
             accounts.append({
                 "account": gl_account,
@@ -455,21 +475,31 @@ def _build_journal_entry_from_voucher(hdr, gl_lines, settings, account_cache, de
                 "user_remark": gl_part,
             })
 
+    # Fallback: no usable GL detail -> post header account against cash/suspense.
+    if not accounts:
+        amount = _bhd(hdr)
+        hdr_account = account_cache.get(acc_code) or _cash
+        if hdr_account and amount:
+            is_receipt = trc_code in CASH_RECEIPT_TRC
+            accounts.append({
+                "account": hdr_account,
+                "debit_in_account_currency":  amount if is_receipt else 0,
+                "credit_in_account_currency": 0 if is_receipt else amount,
+                "account_currency": currency,
+                "user_remark": narration or f"ePromise {trc_code}/{vr_no}",
+            })
+
     if not accounts:
         return None
 
-    # ERPNext Journal Entry needs at least 2 account lines (debit + credit).
-    # If only the header line was resolved, add a suspense/default line on the other side.
     if len(accounts) == 1:
         suspense = default_cash or _get_default_cash_account(company)
         if suspense and suspense != accounts[0]["account"]:
             first = accounts[0]
-            debit  = first["credit_in_account_currency"]   # mirror it
-            credit = first["debit_in_account_currency"]
             accounts.append({
                 "account": suspense,
-                "debit_in_account_currency":  debit,
-                "credit_in_account_currency": credit,
+                "debit_in_account_currency":  first["credit_in_account_currency"],
+                "credit_in_account_currency": first["debit_in_account_currency"],
                 "account_currency": currency,
                 "user_remark": f"[Auto suspense] {narration or vr_no}",
             })
@@ -532,8 +562,8 @@ def _run_voucher_import(log_name, trc_codes, migration_type="Payment Entry"):
         for dt in ("Payment Entry", "Journal Entry"):
             try:
                 rows = frappe.db.get_all(dt, filters={"epromise_vr_no": ["!=", ""]},
-                    fields=["epromise_vr_no"])
-                existing.update(r.epromise_vr_no for r in rows)
+                    fields=["epromise_vr_no", "epromise_trc_code"])
+                existing.update((r.epromise_trc_code, r.epromise_vr_no) for r in rows)
             except Exception:
                 pass
 
@@ -567,7 +597,7 @@ def _run_voucher_import(log_name, trc_codes, migration_type="Payment Entry"):
                     frappe.db.commit()
                     return
 
-            if settings.skip_existing and vr_no in existing:
+            if settings.skip_existing and (trc_code, vr_no) in existing:
                 skipped += 1
                 log_lines.append(f"[SKIP] {trc_code}/{vr_no} — {acc_name}: already imported")
                 continue
@@ -620,7 +650,7 @@ def _run_voucher_import(log_name, trc_codes, migration_type="Payment Entry"):
                 doc.insert(ignore_permissions=True)
 
                 success += 1
-                existing.add(vr_no)
+                existing.add((trc_code, vr_no))
                 log_lines.append(f"[OK] {trc_code}/{vr_no} — {acc_name} | amt={hdr.get('acc_amt')}")
 
                 # Commit and update log progress after every BATCH_SIZE records

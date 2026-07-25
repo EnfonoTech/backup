@@ -139,11 +139,12 @@ after_install = "backup.install.after_install"
 doc_events = {
     "Customer": {
         "validate":     "backup.epromise_migration.utils.account_utils.apply_title_case",
-        "after_insert": "backup.epromise_migration.utils.account_utils.create_customer_account",
     },
     "Supplier": {
         "validate":     "backup.epromise_migration.utils.account_utils.apply_title_case",
-        "after_insert": "backup.epromise_migration.utils.account_utils.create_supplier_account",
+    },
+    "Purchase Invoice": {
+        "validate":     "backup.epromise_migration.utils.pi_hooks.route_stock_expense",
     },
 }
 

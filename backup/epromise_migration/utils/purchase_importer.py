@@ -282,7 +282,7 @@ def _iter_purchase_invoices(settings, trc_codes=None):
         f"SELECT * FROM DICHDATA WHERE TRC_CODE IN ('{trc_ph}') AND POSTED_IND='Y'{hdr_filter} ORDER BY VR_NO",
         params,
     )
-    hdrs = {str(r["VR_NO"]): {k.lower(): v for k, v in dict(r).items()} for r in cur}
+    hdrs = {(str(r["TRC_CODE"]), str(r["VR_NO"])): {k.lower(): v for k, v in dict(r).items()} for r in cur}
 
     from collections import defaultdict
     lines     = defaultdict(list)   # invoice item lines
@@ -305,7 +305,7 @@ def _iter_purchase_invoices(settings, trc_codes=None):
         )
         for r in cur:
             row = {k.lower(): v for k, v in dict(r).items()}
-            lines[str(row["vr_no"])].append(row)
+            lines[(row["trc_code"], str(row["vr_no"]))].append(row)
 
     # 111, IP, PR: items from PURCHASE_DATA
     other_trc = [t for t in trc_codes if t != "350"]
@@ -325,7 +325,7 @@ def _iter_purchase_invoices(settings, trc_codes=None):
         )
         for r in cur:
             row = {k.lower(): v for k, v in dict(r).items()}
-            lines[str(row["vr_no"])].append(row)
+            lines[(row["trc_code"], str(row["vr_no"]))].append(row)
 
     # IP expense lines from DICADDATA (accounts starting with 5)
     if "IP" in trc_codes:
@@ -341,11 +341,11 @@ def _iter_purchase_invoices(settings, trc_codes=None):
         )
         for r in cur:
             row = {k.lower(): v for k, v in dict(r).items()}
-            expenses[str(row["vr_no"])].append(row)
+            expenses[(row["trc_code"], str(row["vr_no"]))].append(row)
 
     conn.close()
-    for vr_no, hdr in hdrs.items():
-        yield hdr, lines.get(vr_no, []), expenses.get(vr_no, [])
+    for _k, hdr in hdrs.items():
+        yield hdr, lines.get(_k, []), expenses.get(_k, [])
 
 
 # ─── invoice builder ──────────────────────────────────────────────────────────
@@ -365,9 +365,12 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
     vr_no     = str(hdr.get("vr_no") or "").strip()
     acc_code  = (hdr.get("acc_code") or "").strip()
     acc_name  = (hdr.get("acc_name") or acc_code or "Unknown").strip()
-    currency  = (hdr.get("cur_code") or settings.default_currency or "BHD").strip()
-    vat_amt   = flt(hdr.get("vat_amt") or 0)
-    acc_amt   = flt(hdr.get("acc_amt") or 0)
+    # ePromise foreign vouchers hold item rates / amounts in the TRANSACTION currency
+    # (e.g. SAR). Convert everything to BHD (base) via cur_rate and post a pure-BHD invoice.
+    _crate    = flt(hdr.get("cur_rate") or 1) or 1
+    currency  = "BHD"
+    vat_amt   = flt(hdr.get("vat_amt") or 0) * _crate
+    acc_amt   = flt(hdr.get("acc_amt") or 0) * _crate
     net_amt   = acc_amt - vat_amt
     bill_no   = (hdr.get("bill_no") or "").strip()
     narration = (hdr.get("particulars") or "").strip()
@@ -403,7 +406,7 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
         ite_code  = _get_or_create_item(orig_ite, item_master_map, settings, item_cache, unified_map=unified_map)
         uom       = _ensure_uom(_map_uom(line.get("base_uom") or line.get("x_unit")))
         qty       = flt(line.get("ite_qty") or 1)
-        rate      = flt(line.get("ite_rate") or 0)
+        rate      = flt(line.get("ite_rate") or 0) * _crate
         uni = (unified_map or {}).get(str(orig_ite))
         item_name = item_name_cache.get(ite_code) or \
             (uni and uni.get("ite_name")) or \
@@ -425,13 +428,22 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
     # Expense service items for IP (freight, customs, etc.)
     for exp in expense_lines:
         exp_acc_code = (exp.get("acc_code") or "").strip()
-        exp_amt      = flt(exp.get("acc_amt") or 0)
+        exp_amt      = flt(exp.get("acc_amt") or 0) * _crate
         particulars  = (exp.get("particulars") or exp_acc_code or "Expense").strip()
         if not exp_amt:
             continue
-        # Get account name for the service item
-        acc_name_exp = frappe.db.get_value("Account",
-            {"account_number": exp_acc_code, "company": settings.erpnext_company}, "name") or exp_acc_code
+        # Resolve the expense sub-account: gl_map first (maps ePromise COGS/landing codes
+        # e.g. 51010300004 -> "51010400004 - Freight Charges - SFTB"), then by number.
+        from backup.epromise_migration.utils.gl_map import resolve_account as _resolve_acc
+        acc_name_exp = None
+        _m = _resolve_acc(exp_acc_code)
+        if _m and frappe.db.exists("Account", _m):
+            acc_name_exp = _m
+        if not acc_name_exp:
+            acc_name_exp = frappe.db.get_value("Account",
+                {"account_number": exp_acc_code, "company": settings.erpnext_company}, "name")
+        if not acc_name_exp:
+            acc_name_exp = expense_account
         svc_item = _get_or_create_service_item(exp_acc_code, particulars, settings, item_cache)
         invoice_items.append({
             "item_code": svc_item,
@@ -457,17 +469,18 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
     from backup.epromise_migration.utils.invoice_importer import (
         INPUT_VAT_ACCOUNT, VAT_RATE, _get_party_account_for_invoice,
     )
-    # Input VAT account (Asset/recoverable) for purchases.
-    input_tax_account = getattr(settings, "default_input_tax_account", None)
+    # Input VAT account by transaction type:
+    #   IP (import)        -> 13120100002 VAT Paid at Customs/ Import
+    #   350/111/PR (local) -> 13120100001 Input VAT A/C (LOCAL)
+    _vat_num = "13120100002" if (trc_code or "").strip() == "IP" else "13120100001"
+    input_tax_account = frappe.db.get_value(
+        "Account", {"company": settings.erpnext_company, "account_number": _vat_num, "is_group": 0}, "name")
     if not input_tax_account:
-        if frappe.db.exists("Account", INPUT_VAT_ACCOUNT):
-            input_tax_account = INPUT_VAT_ACCOUNT
-        else:
-            input_tax_account = frappe.db.get_value(
-                "Account",
-                {"company": settings.erpnext_company, "account_type": "Tax", "root_type": "Asset", "is_group": 0},
-                "name",
-            ) or settings.default_tax_account
+        input_tax_account = frappe.db.get_value(
+            "Account",
+            {"company": settings.erpnext_company, "account_type": "Tax", "root_type": "Asset", "is_group": 0},
+            "name",
+        ) or settings.default_tax_account
 
     taxes = []
     if vat_amt and input_tax_account and flt(vat_amt) != 0:
@@ -488,7 +501,7 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
         "bill_date": posting_date,
         "due_date": posting_date,
         "currency": currency,
-        "conversion_rate": flt(hdr.get("cur_rate") or 1) or 1,
+        "conversion_rate": 1,
         "items": invoice_items,
         "epromise_vr_no": vr_no,
         "epromise_trc_code": trc_code,
@@ -496,6 +509,8 @@ def _build_purchase_invoice(hdr, item_lines, expense_lines, item_master_map,
         "epromise_bill_no": bill_no,
         "set_posting_time": 1,
         "disable_rounded_total": 1,
+        "update_stock": 0,
+        "posting_time": "00:00:00",
         "credit_to": _get_party_account_for_invoice(
             supplier, "Supplier", currency, settings.erpnext_company,
             lambda: _get_payable_account(currency, settings),

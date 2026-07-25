@@ -353,7 +353,22 @@ def _set_doc_totals(inv, conversion_rate=1.0):
         item_total += amt
 
     # ── Tax totals ─────────────────────────────────────────────────────────────
-    tax_total = sum(flt(t.get("tax_amount") or 0) for t in taxes)
+    tax_total = 0.0
+    running = item_total
+    for t in taxes:
+        ta = flt(t.get("tax_amount") or 0)
+        tax_total += ta
+        running += ta
+        # GL reads *_after_discount_amount + base_* (bypassed calc leaves them 0 -> VAT never posts)
+        if not t.get("category"):
+            t["category"] = "Total"
+        if not t.get("add_deduct_tax"):
+            t["add_deduct_tax"] = "Add"
+        t["tax_amount_after_discount_amount"]      = flt(ta, 9)
+        t["base_tax_amount"]                       = flt(ta * cr, 9)
+        t["base_tax_amount_after_discount_amount"] = flt(ta * cr, 9)
+        t["total"]                                 = flt(running, 9)
+        t["base_total"]                            = flt(running * cr, 9)
 
     net_total   = flt(item_total, 9)
     grand_total = flt(item_total + tax_total, 9)
@@ -373,7 +388,7 @@ def _set_doc_totals(inv, conversion_rate=1.0):
     return inv
 
 
-OUTPUT_VAT_ACCOUNT = "22040200002 - VAT Output A/c - SFTB"
+OUTPUT_VAT_ACCOUNT = "22040200002 - VAT Output A/c (LOCAL) - SFTB"
 INPUT_VAT_ACCOUNT  = "13120100001 - VAT Input - SFTB"
 VAT_RATE           = 10.0
 
@@ -414,8 +429,12 @@ def _get_output_tax_account(settings):
     Return the output (sales) VAT account.
     Prefers settings.default_tax_account; falls back to the known SFTB account.
     """
-    if settings.default_tax_account:
-        return settings.default_tax_account
+    # Sales VAT must post to VAT Output (LOCAL) 22040200002 - resolve by number first;
+    # settings.default_tax_account historically pointed at VAT Payable, so do not trust it.
+    out = frappe.db.get_value("Account",
+        {"company": settings.erpnext_company, "account_number": "22040200002", "is_group": 0}, "name")
+    if out:
+        return out
     if frappe.db.exists("Account", OUTPUT_VAT_ACCOUNT):
         return OUTPUT_VAT_ACCOUNT
     return frappe.db.get_value(
@@ -614,15 +633,18 @@ def _iter_invoices(settings, trc_codes=None):
                 """,
                 params,
             )
+            sd_buf = defaultdict(list)
             for r in cur:
                 row = {k.lower(): v for k, v in dict(r).items()}
                 if not row.get("x_unit") and row.get("base_uom"):
                     row["x_unit"] = row["base_uom"]
                 key = (row["trc_code"], str(row["vr_no"]))
-                if key not in lines or not lines[key]:
-                    lines[key] = [row]
-                else:
-                    lines[key].append(row)
+                sd_buf[key].append(row)
+            # SALES_DATA duplicates DICZDATA (redundant subset). Use ONLY as a
+            # fallback for invoices with no DICZDATA lines -- prevents qty doubling.
+            for key, rows in sd_buf.items():
+                if not lines.get(key):
+                    lines[key] = rows
 
         conn.close()
         for (trc, vr), hdr in hdr_rows.items():
@@ -792,6 +814,8 @@ def _build_invoice(hdr, lines, item_master_map, placeholder_code, settings, cust
         "epromise_invoice_type": invoice_type_label,
         "epromise_bill_no": bill_no,
         "set_posting_time": 1,
+        "posting_time": "00:00:00",
+        "status": "Draft",
         "disable_rounded_total": 1,
         "update_stock": 0,
         "is_return": 1 if is_return else 0,

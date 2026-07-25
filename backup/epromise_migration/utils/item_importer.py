@@ -65,7 +65,8 @@ def _run_item_import(log_name):
             frappe.db.commit()
             return
 
-        item_group = settings.default_item_group or "Products"
+        default_group = settings.default_item_group or "Products"
+        _seen_groups = set()
 
         # Build a de-duplicated set of (unified_code, row) — unified_code is the ERPNext key
         seen_codes = set()
@@ -109,13 +110,19 @@ def _run_item_import(log_name):
 
             item_name = (row.get("ite_name") or unified_code).strip()
             uom       = _ensure_uom(_map_uom(row.get("ite_unit") or "NOS"))
+            grp = str(row.get("item_group") or default_group).strip() or default_group
+            if grp not in _seen_groups:
+                if not frappe.db.exists("Item Group", grp):
+                    frappe.get_doc({"doctype": "Item Group", "item_group_name": grp,
+                        "parent_item_group": "All Item Groups", "is_group": 0}).insert(ignore_permissions=True)
+                _seen_groups.add(grp)
 
             try:
                 doc = frappe.get_doc({
                     "doctype": "Item",
                     "item_code": unified_code,
                     "item_name": item_name,
-                    "item_group": item_group,
+                    "item_group": grp,
                     "stock_uom": uom,
                     "is_stock_item": 1,
                     "is_sales_item": 1,

@@ -23,7 +23,7 @@ _DEFAULT_XLS = os.path.normpath(
     os.path.join(
         os.path.dirname(__file__),
         "..", "..", "..",
-        "Copy of Bahrain Master 16.6.26 (1) (1).xls",
+        "BH Enable items.xlsx",
     )
 )
 
@@ -107,8 +107,12 @@ def load_unified_map(xlsx_path=None):
     _aliases = {
         # new Bahrain Master names → canonical key
         "Resource Code":       "resource_code",
+        "old E promise Resource Code": "resource_code",
         "Unified Code":        "unified_code",
+        "Unifide Code":        "unified_code",
         "ERP NEXT Item Name":  "ite_name",
+        "Item Name":           "ite_name",
+        "Item Group":          "item_group",
         "Currenrt Item Name ": "ite_name_alt",  # typo in source file
         "Resource Name":       "resource_name",
         "Unit":                "ite_unit",
@@ -153,6 +157,7 @@ def load_unified_map(xlsx_path=None):
             "unified_code": uni_code,
             "ite_name":     ite_name,
             "ite_unit":     ite_unit,
+            "item_group":   (str(r.get("item_group")).strip() if r.get("item_group") else None),
         }
 
     _cache[path] = result

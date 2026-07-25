@@ -15,6 +15,19 @@ _XLSX_PATH = os.path.join(
     "GL Mapping of E Promise to ERP Next.xlsx",
 )
 
+# COGS split: the source xlsx collapses every COGS sub-account into the single
+# generic "51010100003 - COGS". Override so each ePromise COGS sub-account maps
+# to its own ERPNext leaf (keeps Cost of Goods Sold itself on the generic COGS).
+_COGS_SPLIT_OVERRIDE = {
+    "51010200004": "51010200004 - Loading & Unloading - SFTB",
+    "51010200008": "51010200005 - Packing Materials Expenses - SFTB",
+    "51010300001": "51010300011 - Ocean Freight Charges - SFTB",
+    "51010300002": "51010300012 - Customs Clearance Charge - SFTB",
+    "51010300003": "51010300013 - Customs Duty - SFTB",
+    "51010300004": "51010400004 - Freight Charges - SFTB",
+    "51010300006": "51010300014 - Port Fee , DO and other Charges - SFTB",
+}
+
 
 def load_gl_map():
     """
@@ -41,6 +54,7 @@ def load_gl_map():
     except Exception as e:
         frappe.log_error(str(e), "gl_map: load failed")
 
+    gl_map.update(_COGS_SPLIT_OVERRIDE)   # COGS split
     _GL_MAP_CACHE = gl_map
     return gl_map
 
