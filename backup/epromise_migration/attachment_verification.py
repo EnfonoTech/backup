@@ -724,6 +724,46 @@ def _attachment_vr_date(fy_code, trc_code, vr_no):
 	return row["vr_date"] if row else None
 
 
+def _do_attach(doctype, docname, fy_code, trc_code, vr_no, attachment, conn=None):
+	"""The actual attach, once doctype/docname are already known. Shared by attach_row (resolves
+	its own target via _classify, one attach at a time -- an owned, short-lived MSSQL connection is
+	fine there) and bulk_attach, which passes in ONE connection shared across its whole batch
+	instead -- see bulk_attach's own docstring for why a connection-per-row was the actual cause of
+	a bulk run looking stuck (2026-09-28: measured 1.4s just to OPEN a connection to this MSSQL
+	server; at 20 rows/batch that's ~28s of pure connect overhead before a single blob is fetched,
+	on a page that gives no in-batch progress feedback -- looked hung, was just badly throttled)."""
+	if not frappe.db.exists(doctype, docname):
+		frappe.throw(_("{0} {1} does not exist").format(doctype, docname))
+	if not frappe.has_permission(doctype, "write", doc=docname):
+		frappe.throw(_("No write permission on {0} {1}").format(doctype, docname), frappe.PermissionError)
+
+	if _file_already_attached(doctype, docname, attachment):
+		frappe.throw(_("This attachment is already on {0} {1}").format(doctype, docname))
+
+	owns_conn = conn is None
+	if owns_conn:
+		conn = _get_connection()
+	try:
+		cur = conn.cursor()
+		cur.execute(
+			"SELECT TOP 1 imageobject FROM ATTACHMENT_DETAIL "
+			"WHERE FY_CODE = %(fy)s AND TRC_CODE = %(trc)s AND VR_NO = %(vr)s AND ATTACHMENT = %(att)s",
+			{"fy": fy_code, "trc": trc_code, "vr": vr_no, "att": attachment},
+		)
+		row = cur.fetchone()
+	finally:
+		if owns_conn:
+			conn.close()
+
+	if not row or not row["imageobject"]:
+		frappe.throw(_("Blob not found for this row"))
+
+	f = save_file(attachment, row["imageobject"], doctype, docname, is_private=0, decode=False)
+	frappe.db.commit()
+	_log_action("Attached", doctype, docname, trc_code, vr_no, attachment, f.name)
+	return {"file_url": f.file_url, "doctype": doctype, "docname": docname}
+
+
 @frappe.whitelist()
 def attach_row(fy_code, trc_code, vr_no, attachment, override_doctype=None, override_name=None):
 	_check_role()
@@ -739,31 +779,7 @@ def attach_row(fy_code, trc_code, vr_no, attachment, override_doctype=None, over
 				"Row is not a clean single match ({0}) -- pick a target document explicitly."
 			).format(status))
 
-	if not frappe.db.exists(doctype, docname):
-		frappe.throw(_("{0} {1} does not exist").format(doctype, docname))
-	if not frappe.has_permission(doctype, "write", doc=docname):
-		frappe.throw(_("No write permission on {0} {1}").format(doctype, docname), frappe.PermissionError)
-
-	if _file_already_attached(doctype, docname, attachment):
-		frappe.throw(_("This attachment is already on {0} {1}").format(doctype, docname))
-
-	conn = _get_connection()
-	cur = conn.cursor()
-	cur.execute(
-		"SELECT TOP 1 imageobject FROM ATTACHMENT_DETAIL "
-		"WHERE FY_CODE = %(fy)s AND TRC_CODE = %(trc)s AND VR_NO = %(vr)s AND ATTACHMENT = %(att)s",
-		{"fy": fy_code, "trc": trc_code, "vr": vr_no, "att": attachment},
-	)
-	row = cur.fetchone()
-	conn.close()
-
-	if not row or not row["imageobject"]:
-		frappe.throw(_("Blob not found for this row"))
-
-	f = save_file(attachment, row["imageobject"], doctype, docname, is_private=0, decode=False)
-	frappe.db.commit()
-	_log_action("Attached", doctype, docname, trc_code, vr_no, attachment, f.name)
-	return {"file_url": f.file_url, "doctype": doctype, "docname": docname}
+	return _do_attach(doctype, docname, fy_code, trc_code, vr_no, attachment)
 
 
 @frappe.whitelist()
@@ -801,7 +817,16 @@ def bulk_attach(trc_code=None, search=None, from_date=None, to_date=None, target
 	repeatedly: a row that succeeds flips from 'clean' to 'attached' and drops out of the next
 	get_rows(status='clean') scan on its own, so the caller just loops this until processed == 0 --
 	no offset/cursor bookkeeping needed. Never touches 'unmatched'/'duplicate' rows -- those still
-	need a human to pick a target, which is the entire point of this review page."""
+	need a human to pick a target, which is the entire point of this review page.
+
+	ONE MSSQL connection for the WHOLE batch, reused across every row via _do_attach's conn= param
+	-- attach_row (and this function, before 2026-09-28) opened a fresh connection PER ROW, and
+	that connect alone measured 1.4s on this box; at the default batch_size=20 that is ~28s of
+	pure connection setup before a single blob is even fetched, on a dialog that shows no
+	in-batch progress -- a large bulk-attach run (thousands of rows) looked hung, it was just this.
+	Also reuses get_rows' own already-computed doctype/matched_name for each row instead of calling
+	_classify() a second time -- both calls would resolve identically since this batch's own
+	get_rows() call is the one that just produced these exact rows, milliseconds earlier."""
 	_check_role()
 	batch_size = frappe.utils.cint(batch_size) or 20
 
@@ -809,16 +834,23 @@ def bulk_attach(trc_code=None, search=None, from_date=None, to_date=None, target
 		to_date=to_date, target_doctype=target_doctype, limit_start=0, limit_page_length=batch_size)
 
 	attached, failed = [], []
-	for row in page["rows"]:
-		try:
-			r = attach_row(row["fy_code"], row["trc_code"], row["vr_no"], row["attachment"])
-			attached.append({"trc_code": row["trc_code"], "vr_no": row["vr_no"],
-				"attachment": row["attachment"], "doctype": r["doctype"], "docname": r["docname"],
-				"file_url": r["file_url"]})
-		except Exception as e:
-			frappe.db.rollback()
-			failed.append({"trc_code": row["trc_code"], "vr_no": row["vr_no"],
-				"attachment": row["attachment"], "error": str(e)[:300]})
+	conn = _get_connection()
+	try:
+		for row in page["rows"]:
+			try:
+				r = _do_attach(
+					row["doctype"], row["matched_name"], row["fy_code"], row["trc_code"], row["vr_no"],
+					row["attachment"], conn=conn,
+				)
+				attached.append({"trc_code": row["trc_code"], "vr_no": row["vr_no"],
+					"attachment": row["attachment"], "doctype": r["doctype"], "docname": r["docname"],
+					"file_url": r["file_url"]})
+			except Exception as e:
+				frappe.db.rollback()
+				failed.append({"trc_code": row["trc_code"], "vr_no": row["vr_no"],
+					"attachment": row["attachment"], "error": str(e)[:300]})
+	finally:
+		conn.close()
 
 	return {"processed": len(page["rows"]), "attached": attached, "failed": failed,
 		"remaining_clean_total": page["total"] - len(attached)}

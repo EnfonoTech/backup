@@ -563,7 +563,11 @@ class AttachmentVerification {
 		function step() {
 			frappe.call({
 				method: 'backup.epromise_migration.attachment_verification.bulk_attach',
-				args: Object.assign({}, filter_args, { batch_size: 20 }),
+				// 2026-09-28: bumped from 20 -- bulk_attach's own per-row MSSQL connection was the
+				// actual bottleneck (fixed server-side, one shared connection per batch now), so a
+				// bigger batch means fewer round trips of get_rows' own full-table reclassify scan
+				// instead of fewer rows attached per call.
+				args: Object.assign({}, filter_args, { batch_size: 100 }),
 				callback(r) {
 					const msg = r.message;
 					attached_count += msg.attached.length;
