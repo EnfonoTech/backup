@@ -12,18 +12,37 @@ function render_voucher_info_html(v) {
 	if (!v || !v.found) {
 		return '<div class="text-muted">No matching voucher found in the transactional ePromise database for this row.</div>';
 	}
+	// { raw: true } rows already come out of a Frappe formatter (frappe.format / str_to_user) and
+	// are safe, self-contained HTML -- escaping them a second time turns their own markup into
+	// visible text. Everything else is untrusted plain text straight out of dichdata and MUST be
+	// escaped.
+	const branch = v.source_branch && v.target_branch && v.source_branch !== v.target_branch
+		? `${v.source_branch} -> ${v.target_branch}` : (v.source_branch || v.target_branch || '-');
+	const ref = v.ref_trc_code && v.ref_vr_no ? `${v.ref_trc_code}/${v.ref_vr_no}` : '-';
+
 	const rows = [
-		['Voucher Date', frappe.datetime.str_to_user(v.vr_date)],
-		['Amount', v.amount != null ? frappe.format(v.amount, { fieldtype: 'Currency' }) : '-'],
-		['Particulars', v.particulars || '-'],
-		['Payee Name', v.payee_name || '-'],
-		['Account', v.acc_name || '-'],
-		['Bill No', v.bill_no || '-'],
-		['Bill Date', v.bill_date ? frappe.datetime.str_to_user(v.bill_date) : '-'],
+		{ label: 'Voucher Date', value: frappe.datetime.str_to_user(v.vr_date), raw: true },
+		{ label: 'Amount', value: v.amount != null ? frappe.format(v.amount, { fieldtype: 'Currency', options: v.currency }) : '-', raw: true },
+		{ label: 'Currency', value: v.currency ? `${v.currency}${v.currency_rate ? ' @ ' + v.currency_rate : ''}` : '-' },
+		{ label: 'VAT Amount', value: v.vat_amount != null ? frappe.format(v.vat_amount, { fieldtype: 'Currency', options: v.currency }) : '-', raw: true },
+		{ label: 'Total VAT', value: v.total_vat != null ? frappe.format(v.total_vat, { fieldtype: 'Currency', options: v.currency }) : '-', raw: true },
+		{ label: 'Particulars', value: v.particulars || '-' },
+		{ label: 'Payee Name', value: v.payee_name || '-' },
+		{ label: 'Supplier Name', value: v.supplier_name || '-' },
+		{ label: 'Account', value: v.acc_name || '-' },
+		{ label: 'Bill No', value: v.bill_no || '-' },
+		{ label: 'Bill Date', value: v.bill_date ? frappe.datetime.str_to_user(v.bill_date) : '-', raw: true },
+		{ label: 'Tax Invoice No', value: v.tax_invoice_no || '-' },
+		{ label: 'LPO No', value: v.lpo_no || '-' },
+		{ label: 'Branch', value: branch },
+		{ label: 'References Voucher', value: ref },
+		{ label: 'Posted (ePromise)', value: v.posted === 'Y' ? 'Yes' : (v.posted === 'N' ? 'No' : '-') },
+		{ label: 'Created By', value: v.created_user || '-' },
+		{ label: 'Created On', value: v.created_date ? frappe.datetime.str_to_user(v.created_date) : '-', raw: true },
 	];
-	return '<table class="table table-bordered">' + rows.map(function (pair) {
-		return '<tr><th style="width:140px;">' + pair[0] + '</th><td>' +
-			frappe.utils.escape_html(String(pair[1])) + '</td></tr>';
+	return '<table class="table table-bordered">' + rows.map(function (r) {
+		const value = r.raw ? String(r.value) : frappe.utils.escape_html(String(r.value));
+		return '<tr><th style="width:150px;">' + r.label + '</th><td>' + value + '</td></tr>';
 	}).join('') + '</table>';
 }
 

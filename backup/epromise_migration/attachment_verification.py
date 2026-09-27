@@ -99,7 +99,10 @@ def _get_voucher_reference(fy_code, trc_code, vr_no):
 	cur = conn.cursor()
 	cur.execute(
 		"SELECT TOP 1 VR_DATE, LOCAL_CUR_AMT, ACC_AMT, PARTICULARS, PAYEE_NAME, ACC_NAME, "
-		"BILL_NO, BILL_DATE FROM dichdata "
+		"BILL_NO, BILL_DATE, CUR_CODE, CUR_RATE, SOURCE_BR_CODE, TARGET_BR_CODE, "
+		"CREATED_USER, CREATED_DATE, REF_TRC_CODE, REF_VR_NO, supplier_name, "
+		"vat_amt, total_vat, POSTED_IND, LPO_NO, tax_invoice_no "
+		"FROM dichdata "
 		"WHERE FY_CODE = %(fy)s AND TRC_CODE = %(trc)s AND CAST(VR_NO AS VARCHAR(50)) = %(vr)s",
 		{"fy": fy_code, "trc": trc_code, "vr": str(vr_no)},
 	)
@@ -112,6 +115,13 @@ def _get_voucher_reference(fy_code, trc_code, vr_no):
 		"amount": row["LOCAL_CUR_AMT"] if row["LOCAL_CUR_AMT"] is not None else row["ACC_AMT"],
 		"particulars": row["PARTICULARS"], "payee_name": row["PAYEE_NAME"],
 		"acc_name": row["ACC_NAME"], "bill_no": row["BILL_NO"], "bill_date": row["BILL_DATE"],
+		"currency": row["CUR_CODE"], "currency_rate": row["CUR_RATE"],
+		"source_branch": row["SOURCE_BR_CODE"], "target_branch": row["TARGET_BR_CODE"],
+		"created_user": row["CREATED_USER"], "created_date": row["CREATED_DATE"],
+		"ref_trc_code": row["REF_TRC_CODE"], "ref_vr_no": row["REF_VR_NO"],
+		"supplier_name": row["supplier_name"], "vat_amount": row["vat_amt"],
+		"total_vat": row["total_vat"], "posted": row["POSTED_IND"],
+		"lpo_no": row["LPO_NO"], "tax_invoice_no": row["tax_invoice_no"],
 	}
 
 
