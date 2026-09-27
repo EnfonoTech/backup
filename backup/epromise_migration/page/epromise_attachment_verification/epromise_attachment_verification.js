@@ -8,7 +8,13 @@ frappe.pages['epromise-attachment-verification'].on_page_load = function (wrappe
 	new AttachmentVerification(page);
 };
 
-const DOCTYPE_OPTIONS = ['Sales Invoice', 'Purchase Invoice', 'Purchase Receipt', 'Payment Entry', 'Journal Entry'];
+const DOCTYPE_OPTIONS = ['Sales Invoice', 'Purchase Invoice', 'Purchase Receipt', 'Payment Entry', 'Journal Entry', 'Employee', 'Customer'];
+
+// EMP/RHD resolve to a master record (Employee/Customer), not a voucher -- there is no amount/date
+// to fuzzy-match against (see attachment_verification.py's AMOUNT_FIELD, which only covers
+// transactional doctypes), so the "Fuzzy match suggestions" panel in the manual-pick dialog is
+// skipped entirely for these rather than erroring out of suggest_candidates.
+const NON_TRANSACTIONAL_DOCTYPES = ['Employee', 'Customer'];
 
 const CONFIDENCE_META = {
 	high: { label: 'High', color: 'green' },
@@ -469,6 +475,12 @@ class AttachmentVerification {
 	refresh_suggestions(d, row) {
 		const doctype = d.get_value('doctype');
 		if (!doctype) return;
+		if (NON_TRANSACTIONAL_DOCTYPES.includes(doctype)) {
+			d.fields_dict.suggestions_html.$wrapper.html(
+				'<div class="text-muted">No fuzzy-match suggestions for ' + doctype + ' -- pick a Document Name directly.</div>'
+			);
+			return;
+		}
 		d.fields_dict.suggestions_html.$wrapper.html('<div class="text-muted">Loading suggestions...</div>');
 
 		frappe.call({

@@ -39,9 +39,9 @@ from frappe.utils.file_manager import save_file
 #: their attachments read as "out_of_scope" (looked never-migrated) when they were in fact migrated
 #: fine. Deliberately NOT added: "301"/"300" (inventory-adjustment vouchers, LOCAL_CUR_AMT always
 #: 0 -- confirmed live, no GL/financial document was ever meant to exist for these, an accepted
-#: migration gap) and "EMP"/"RHD" (0 rows in dichdata, the transactional voucher database, under
-#: EITHER code -- these attachments belong to some other ePromise subsystem entirely, not a
-#: financial voucher this migration ever touched).
+#: migration gap). "EMP"/"RHD" are NOT financial vouchers at all (0 rows in dichdata under either
+#: code) so they don't belong in this table -- see SPECIAL_BULK_RESOLVERS below for their own,
+#: structurally different resolution.
 ROUTING = {
 	"S01": ["Sales Invoice"], "S06": ["Sales Invoice"], "R01": ["Sales Invoice"], "R04": ["Sales Invoice"],
 	"350": ["Purchase Invoice"], "111": ["Purchase Invoice"], "IP": ["Purchase Invoice"], "PR": ["Purchase Invoice"],
@@ -50,6 +50,56 @@ ROUTING = {
 	"020": ["Journal Entry"], "007": ["Journal Entry"],
 	"025": ["Journal Entry"], "011": ["Journal Entry"], "BA": ["Journal Entry"], "006": ["Journal Entry"],
 }
+
+
+def _resolve_emp_bulk(vr_nos):
+	"""EMP: vr_no IS the ePromise employee code, which is exactly Employee.employee_number on this
+	site -- confirmed live 2026-09-28: employee_number '22024' = 'Reshma Ramesh', matching the EMP
+	VR_NO that files her WORK PERMIT/PASSPORT attachments. ePromise's own HR/payroll module
+	(PAY_EMPLOYEE_MASTER, PAY_EMPLOYEE_DOCUMENTS, HIRE_EMPLOYEE_DOCUMENTS -- a separate subsystem
+	from the financial ledger dichdata reads from) already carries this same code; this migration's
+	own, earlier, separate HR import evidently reused it as Employee.employee_number. No
+	epromise_trc_code/vr_no/vr custom field involved at all -- a completely different resolution
+	path from every trc in ROUTING above. Returns {vr_no: [(doctype, name)]} for the whole batch in
+	one query."""
+	out = {}
+	for r in frappe.get_all("Employee", filters={"employee_number": ["in", list(vr_nos)]}, fields=["name", "employee_number"]):
+		out.setdefault(r.employee_number, []).append(("Employee", r.name))
+	return out
+
+
+def _resolve_rhd_bulk(vr_nos):
+	"""RHD: vr_no IS an ERPNext ledger Account's own account_number (a customer receivable control
+	account) -- confirmed live 2026-09-28, all 6 distinct RHD codes on this site: e.g. '130302A0004'
+	= Account '130302A0004 - Ambi Metal Products Co. Bahrain Partnership Co. - SFB'. Resolved back
+	to its OWNING Customer via the core Party Account child table (Account -> Party Account.account
+	-> Party Account.parent) -- the same link ERPNext itself uses to find a party's default ledger,
+	not a name guess (Customer.epromise_acc_code is blank on every one of these, a separate,
+	smaller gap this does not attempt to fix). Two batched queries for the whole set, never one per
+	vr_no."""
+	accounts = frappe.get_all("Account", filters={"account_number": ["in", list(vr_nos)]}, fields=["name", "account_number"])
+	account_to_vr = {a.name: a.account_number for a in accounts}
+	if not account_to_vr:
+		return {}
+	out = {}
+	for r in frappe.get_all(
+		"Party Account",
+		filters={"account": ["in", list(account_to_vr.keys())], "parenttype": "Customer"},
+		fields=["account", "parent"],
+	):
+		vr = account_to_vr.get(r.account)
+		if vr:
+			out.setdefault(vr, []).append(("Customer", r.parent))
+	return out
+
+
+#: trc -> (batched resolver, display doctype for an unmatched/duplicate row). Checked BEFORE
+#: ROUTING in both _classify and _classify_bulk -- these are master records, not vouchers, so none
+#: of ROUTING's epromise_vr matching, docstatus-cancelled exclusion, or date tie-break applies;
+#: each vr_no is expected to resolve to exactly one record via a completely different link.
+SPECIAL_BULK_RESOLVERS = {"EMP": _resolve_emp_bulk, "RHD": _resolve_rhd_bulk}
+SPECIAL_DISPLAY_DOCTYPE = {"EMP": "Employee", "RHD": "Customer"}
+
 
 PREVIEWABLE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 	".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf"}
@@ -332,7 +382,19 @@ def _classify(trc, vr_no, vr_date=None):
 	original against its live replacement under the exact same epromise_vr key, reading as a false
 	"duplicate" (confirmed live: 025's own JE ACC-JV-2026-04250 cancelled + ACC-JV-2026-04250-1
 	live, same key). vr_date, when given, additionally breaks a genuine remaining tie by date
-	proximity -- see _resolve_ties_by_date."""
+	proximity -- see _resolve_ties_by_date.
+
+	EMP/RHD are checked FIRST, ahead of ROUTING entirely -- see SPECIAL_BULK_RESOLVERS's own
+	docstring for why they need a structurally different lookup (a master record, not a voucher)."""
+	if trc in SPECIAL_BULK_RESOLVERS:
+		matches = SPECIAL_BULK_RESOLVERS[trc]([vr_no]).get(vr_no, [])
+		if not matches:
+			return SPECIAL_DISPLAY_DOCTYPE[trc], "unmatched", None, []
+		if len(matches) > 1:
+			return matches[0][0], "duplicate", None, [{"doctype": d, "name": n} for d, n in matches]
+		doctype, name = matches[0]
+		return doctype, "clean", name, []
+
 	doctypes = ROUTING.get(trc)
 	if not doctypes:
 		return None, "out_of_scope", None, []
@@ -394,12 +456,37 @@ def _classify_bulk(pairs, vr_dates=None):
 	date proximity (see _resolve_ties_by_date) rather than this function re-fetching it. Cancelled
 	documents (docstatus=2) are excluded from matches outright, not merely tie-broken -- see
 	_classify's own docstring for why (an amended voucher's cancelled original vs. its live
-	replacement)."""
+	replacement).
+
+	EMP/RHD pairs are split off and resolved via SPECIAL_BULK_RESOLVERS entirely separately, before
+	any of the ROUTING/epromise_vr/docstatus/date-tiebreak machinery below ever sees them -- see
+	that dict's own docstring for why."""
 	vr_dates = vr_dates or {}
 	result = {}
+
+	special_vrs_by_trc = {}
+	routed_pairs = []
+	for trc, vr in pairs:
+		if trc in SPECIAL_BULK_RESOLVERS:
+			special_vrs_by_trc.setdefault(trc, set()).add(vr)
+		else:
+			routed_pairs.append((trc, vr))
+
+	for trc, vr_set in special_vrs_by_trc.items():
+		matches_by_vr = SPECIAL_BULK_RESOLVERS[trc](vr_set)
+		display_doctype = SPECIAL_DISPLAY_DOCTYPE[trc]
+		for vr in vr_set:
+			matches = matches_by_vr.get(vr, [])
+			if not matches:
+				result[(trc, vr)] = (display_doctype, "unmatched", None, [])
+			elif len(matches) > 1:
+				result[(trc, vr)] = (matches[0][0], "duplicate", None, [{"doctype": d, "name": n} for d, n in matches])
+			else:
+				result[(trc, vr)] = (matches[0][0], "clean", matches[0][1], [])
+
 	candidate_doctypes_by_pair = {}
 	pairs_by_doctype = {}
-	for trc, vr in pairs:
+	for trc, vr in routed_pairs:
 		doctypes = ROUTING.get(trc)
 		if not doctypes:
 			result[(trc, vr)] = (None, "out_of_scope", None, [])
@@ -454,7 +541,7 @@ def _classify_bulk(pairs, vr_dates=None):
 		for pair, names in found_by_pair.items():
 			matches_by_pair.setdefault(pair, []).extend((doctype, n) for n in names)
 
-	for trc, vr in pairs:
+	for trc, vr in routed_pairs:
 		pair = (trc, vr)
 		doctypes = candidate_doctypes_by_pair[pair]
 		if doctypes is None:
