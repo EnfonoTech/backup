@@ -246,7 +246,9 @@ def suggest_candidates(doctype, fy_code, trc_code, vr_no, days_window=15, limit=
 
 
 def _classify(trc, vr_no):
-	"""Return (doctype_or_None, status, matched_name_or_None, candidates).
+	"""Single-row classify: return (doctype_or_None, status, matched_name_or_None, candidates).
+	Used by the single-row actions (attach_row/detach_row). For scanning many rows at once (the
+	table/status-bar), use _classify_bulk() instead -- see its docstring for why.
 
 	Two migration eras coexist across sites (confirmed live on sft-uat, 2026-09-27): the CURRENT
 	importer writes separate epromise_trc_code + epromise_vr_no fields, but an EARLIER era (still
@@ -284,6 +286,98 @@ def _classify(trc, vr_no):
 		return doctype, "duplicate", None, matches
 
 	return doctype, "clean", matches[0], []
+
+
+def _classify_bulk(pairs):
+	"""Classify many (trc, vr) pairs in a FIXED number of queries (2 per involved doctype: split
+	fields + legacy fallback) instead of _classify()'s 1-2 queries PER PAIR. get_rows() scans every
+	attachment row on every page load/refresh (often 1000s of rows) -- calling _classify() in that
+	loop was the actual cause of the page feeling slow/hung: a few thousand synchronous MySQL round
+	trips per refresh. Returns {(trc, vr): (doctype, status, matched_name, candidates)}."""
+	result = {}
+	by_doctype = {}
+	for trc, vr in pairs:
+		doctype = ROUTING.get(trc)
+		if not doctype:
+			result[(trc, vr)] = (None, "out_of_scope", None, [])
+			continue
+		by_doctype.setdefault(doctype, set()).add((trc, vr))
+
+	for doctype, trc_vr_set in by_doctype.items():
+		meta = frappe.get_meta(doctype)
+		has_split = meta.has_field("epromise_trc_code") and meta.has_field("epromise_vr_no")
+		has_legacy = meta.has_field("epromise_vr")
+
+		if not has_split and not has_legacy:
+			for pair in trc_vr_set:
+				result[pair] = (doctype, "fields_missing", None, [])
+			continue
+
+		matches_by_pair = {}
+
+		if has_split:
+			vr_list = sorted({vr for _, vr in trc_vr_set})
+			for r in frappe.get_all(
+				doctype,
+				filters={"epromise_vr_no": ["in", vr_list], "epromise_trc_code": ["not in", ["", None]]},
+				fields=["name", "epromise_trc_code", "epromise_vr_no"],
+			):
+				key = (r.epromise_trc_code, r.epromise_vr_no)
+				if key in trc_vr_set:
+					matches_by_pair.setdefault(key, []).append(r.name)
+
+		if has_legacy:
+			still_missing = trc_vr_set - matches_by_pair.keys()
+			if still_missing:
+				legacy_to_pair = {f"{trc}|{vr}": (trc, vr) for trc, vr in still_missing}
+				for r in frappe.get_all(
+					doctype, filters={"epromise_vr": ["in", list(legacy_to_pair.keys())]},
+					fields=["name", "epromise_vr"],
+				):
+					pair = legacy_to_pair.get(r.epromise_vr)
+					if pair:
+						matches_by_pair.setdefault(pair, []).append(r.name)
+
+		for pair in trc_vr_set:
+			names = matches_by_pair.get(pair, [])
+			if not names:
+				result[pair] = (doctype, "unmatched", None, [])
+			elif len(names) > 1:
+				result[pair] = (doctype, "duplicate", None, names)
+			else:
+				result[pair] = (doctype, "clean", names[0], [])
+
+	return result
+
+
+def _bulk_already_attached(clean_lookups):
+	"""clean_lookups: iterable of (doctype, docname, attachment_filename). Returns the subset
+	(as a set of the same tuples) that already have a matching File, using ONE query per doctype
+	(IN on docname) instead of one query per row -- see _find_attached_file for why the match is
+	by name/extension split, not exact filename."""
+	by_doc = {}
+	for doctype, docname, fname in clean_lookups:
+		by_doc.setdefault((doctype, docname), []).append(fname)
+	if not by_doc:
+		return set()
+
+	files_by_docname = {}
+	for doctype in {d for d, _ in by_doc}:
+		docnames = sorted({dn for d, dn in by_doc if d == doctype})
+		for f in frappe.get_all(
+			"File", filters={"attached_to_doctype": doctype, "attached_to_name": ["in", docnames]},
+			fields=["attached_to_name", "file_name"],
+		):
+			files_by_docname.setdefault((doctype, f.attached_to_name), []).append(f.file_name)
+
+	already = set()
+	for (doctype, docname), fnames in by_doc.items():
+		existing = files_by_docname.get((doctype, docname), [])
+		for fname in fnames:
+			partial, extn = os.path.splitext(fname or "")
+			if any(ef.startswith(partial) and ef.endswith(extn) for ef in existing):
+				already.add((doctype, docname, fname))
+	return already
 
 
 @frappe.whitelist()
@@ -324,20 +418,35 @@ def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=No
 	all_rows = cur.fetchall()
 	conn.close()
 
-	out = []
-	for row in all_rows:
-		trc = (row["TRC_CODE"] or "").strip()
-		vr = str(row["VR_NO"]).strip()
-		doctype, row_status, matched_name, candidates = _classify(trc, vr)
+	pairs = [((row["TRC_CODE"] or "").strip(), str(row["VR_NO"]).strip()) for row in all_rows]
+	match_index = _classify_bulk(set(pairs))
 
+	clean_lookups = []
+	for row, pair in zip(all_rows, pairs):
+		doctype, row_status, matched_name, candidates = match_index[pair]
 		if row_status == "clean":
-			already = _file_already_attached(doctype, matched_name, row["ATTACHMENT"])
-			if already:
-				row_status = "attached"
+			clean_lookups.append((doctype, matched_name, row["ATTACHMENT"]))
+	already_attached = _bulk_already_attached(clean_lookups)
+
+	counts = {"clean": 0, "attached": 0, "unmatched": 0, "duplicate": 0,
+		"out_of_scope": 0, "fields_missing": 0}
+	out = []
+	for row, pair in zip(all_rows, pairs):
+		trc, vr = pair
+		doctype, row_status, matched_name, candidates = match_index[pair]
+
+		if row_status == "clean" and (doctype, matched_name, row["ATTACHMENT"]) in already_attached:
+			row_status = "attached"
+
+		if target_doctype and doctype != target_doctype:
+			continue
+
+		# counts reflect every trc_code/search/date/target_doctype filter but are tallied across
+		# ALL statuses regardless of the `status` filter, so the summary bar always shows the full
+		# breakdown no matter which status tab is currently selected.
+		counts[row_status] = counts.get(row_status, 0) + 1
 
 		if status and status != "all" and row_status != status:
-			continue
-		if target_doctype and doctype != target_doctype:
 			continue
 
 		out.append({
@@ -347,9 +456,10 @@ def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=No
 			"matched_name": matched_name, "candidates": candidates,
 		})
 
+	counts["total"] = sum(counts.values())
 	total = len(out)
 	page = out[limit_start:limit_start + limit_page_length]
-	return {"rows": page, "total": total}
+	return {"rows": page, "total": total, "counts": counts}
 
 
 @frappe.whitelist()
@@ -476,23 +586,6 @@ def bulk_attach(trc_code=None, search=None, from_date=None, to_date=None, target
 
 
 @frappe.whitelist()
-def get_status_counts(trc_code=None, search=None, from_date=None, to_date=None, target_doctype=None):
-	"""One-pass tally for the 'at a glance' summary bar -- same scan/classify as get_rows() but
-	returns counts per status instead of building the full row list, so the summary bar and the
-	table underneath always agree on the same filters without a second expensive round trip."""
-	_check_role()
-	page = get_rows(trc_code=trc_code, search=search, from_date=from_date, to_date=to_date,
-		target_doctype=target_doctype, status="all", limit_start=0, limit_page_length=100000)
-
-	counts = {"clean": 0, "attached": 0, "unmatched": 0, "duplicate": 0,
-		"out_of_scope": 0, "fields_missing": 0}
-	for row in page["rows"]:
-		counts[row["status"]] = counts.get(row["status"], 0) + 1
-	counts["total"] = page["total"]
-	return counts
-
-
-@frappe.whitelist()
 def get_thumbnails(rows):
 	"""Batched small-preview fetch for the table's optional 'Show Thumbnails' mode -- one round
 	trip for the whole visible page instead of one per row. `rows` is a JSON list of
@@ -524,18 +617,3 @@ def get_thumbnails(rows):
 	if conn:
 		conn.close()
 	return out
-
-
-@frappe.whitelist()
-def search_candidates(doctype, txt):
-	_check_role()
-	if doctype not in set(ROUTING.values()):
-		frappe.throw(_("Invalid doctype"))
-	return frappe.get_all(
-		doctype,
-		filters=[["name", "like", "%" + (txt or "") + "%"]],
-		fields=["name"],
-		limit=20,
-		order_by="modified desc",
-		pluck="name",
-	)

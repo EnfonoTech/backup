@@ -172,7 +172,7 @@ class AttachmentVerification {
 	refresh() {
 		const me = this;
 		this.$tbody.html('<tr><td colspan="8" class="text-muted">Loading...</td></tr>');
-		this.refresh_status_bar();
+		this.$status_bar.html('<span class="text-muted">Loading...</span>');
 
 		frappe.call({
 			method: 'backup.epromise_migration.attachment_verification.get_rows',
@@ -182,18 +182,11 @@ class AttachmentVerification {
 				limit_page_length: this.page_length,
 			}),
 			callback(r) {
+				// one call now returns both the page of rows AND the full-filter status counts
+				// (see attachment_verification.py get_rows docstring) -- this used to be two
+				// separate full-dataset scans per refresh, which is what made the page feel slow.
+				me.render_status_bar(r.message.counts);
 				me.render(r.message);
-			},
-		});
-	}
-
-	refresh_status_bar() {
-		const me = this;
-		frappe.call({
-			method: 'backup.epromise_migration.attachment_verification.get_status_counts',
-			args: this.get_filter_args(),
-			callback(r) {
-				me.render_status_bar(r.message);
 			},
 		});
 	}
