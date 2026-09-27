@@ -67,6 +67,13 @@ def _classify(trc, vr_no):
 	if not doctype:
 		return None, "out_of_scope", None, []
 
+	meta = frappe.get_meta(doctype)
+	if not (meta.has_field("epromise_trc_code") and meta.has_field("epromise_vr_no")):
+		# the migration importer for this doctype has never run on this site (e.g. sft-uat,
+		# which has no migrated ePromise data at all) -- the custom fields only get created
+		# when that importer actually runs, not via a plain bench migrate.
+		return doctype, "fields_missing", None, []
+
 	matches = frappe.get_all(
 		doctype, filters={"epromise_trc_code": trc, "epromise_vr_no": vr_no}, pluck="name"
 	)

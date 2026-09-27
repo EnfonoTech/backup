@@ -13,6 +13,7 @@ const STATUS_META = {
 	attached: { label: 'Already attached', color: 'green' },
 	unmatched: { label: 'No match found', color: 'orange' },
 	duplicate: { label: 'Multiple matches', color: 'red' },
+	fields_missing: { label: 'Not migrated on this site', color: 'grey' },
 	out_of_scope: { label: 'Not migrated (TRC not mapped)', color: 'grey' },
 };
 
@@ -44,6 +45,7 @@ class AttachmentVerification {
 				{ label: 'No match found', value: 'unmatched' },
 				{ label: 'Multiple matches', value: 'duplicate' },
 				{ label: 'Not migrated', value: 'out_of_scope' },
+				{ label: 'Not migrated on this site', value: 'fields_missing' },
 			].map((o) => o.value).join('\n'),
 			default: 'clean',
 			change() { me.limit_start = 0; me.refresh(); },
