@@ -14,6 +14,7 @@ alone: VR_NO is reused as a bare reference number across unrelated documents.
 """
 
 import base64
+import difflib
 import os
 
 import frappe
@@ -40,21 +41,69 @@ AMOUNT_FIELD = {
 	"Payment Entry": "paid_amount", "Journal Entry": "total_debit",
 }
 
+# header-level party name field to fuzzy-compare against the voucher's own payee/supplier name.
+# Journal Entry has no single header party field (party lives per accounting row) -- skipped.
+PARTY_FIELD = {
+	"Sales Invoice": "customer_name", "Purchase Invoice": "supplier_name",
+	"Purchase Receipt": "supplier_name", "Payment Entry": "party_name",
+}
 
-def _file_already_attached(doctype, docname, attachment_filename):
+
+def _party_similarity(a, b):
+	"""0-1 fuzzy string similarity (difflib, no extra dependency) between two party names,
+	case/space-insensitive. Either side blank -> None (no signal, not a zero score)."""
+	a, b = (a or "").strip().lower(), (b or "").strip().lower()
+	if not a or not b:
+		return None
+	return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _confidence_tier(amount_diff, target_amount, date_diff, party_score):
+	"""Roll amount/date/party closeness into one at-a-glance tier for the fuzzy suggestion list.
+	Amount is the dominant signal (an exact-ish amount match on a legacy cash/petty-cash ledger is
+	rarely a coincidence); party name only available for some doctypes (see PARTY_FIELD) so it can
+	only raise a tier, never the sole reason for "high"."""
+	amount_pct = (amount_diff / target_amount) if target_amount else (1 if amount_diff else 0)
+	strong_amount = amount_diff <= 0.01 or amount_pct <= 0.01
+	close_amount = amount_diff <= 0.5 or amount_pct <= 0.05
+	strong_party = party_score is not None and party_score >= 0.7
+
+	if strong_amount and date_diff <= 3:
+		return "high"
+	if (strong_amount and date_diff <= 15) or (close_amount and date_diff <= 5) or (close_amount and strong_party):
+		return "medium"
+	return "low"
+
+
+def _find_attached_file(doctype, docname, attachment_filename):
 	"""Frappe's own save_file() renames on a naming collision to "{name}{6-char-hash-suffix}{ext}"
 	(frappe/core/doctype/file/utils.py: get_content_hash() -> md5, get_file_name() splices
 	content_hash[-6:] between the name and extension) -- so an EXACT file_name match misses every
 	file that collided with an existing name on disk, which is common (many rows share a filename
-	like "Scan.pdf"). Match by the same name/extension split instead, allowing anything in between."""
+	like "Scan.pdf"). Match by the same name/extension split instead, allowing anything in between.
+	Returns the File docname, or None."""
 	partial, extn = os.path.splitext(attachment_filename or "")
-	return frappe.db.exists(
+	return frappe.db.get_value(
 		"File",
 		{
 			"attached_to_doctype": doctype, "attached_to_name": docname,
 			"file_name": ["like", f"{partial}%{extn}"],
 		},
+		"name",
 	)
+
+
+def _file_already_attached(doctype, docname, attachment_filename):
+	return bool(_find_attached_file(doctype, docname, attachment_filename))
+
+
+def _log_action(action, doctype, docname, trc_code, vr_no, attachment_filename, file_name):
+	frappe.get_doc({
+		"doctype": "ePromise Attachment Log", "action": action,
+		"target_doctype": doctype, "target_name": docname,
+		"trc_code": trc_code, "vr_no": vr_no,
+		"attachment_filename": attachment_filename, "file": file_name,
+	}).insert(ignore_permissions=True)
 
 
 def _check_role():
@@ -170,19 +219,28 @@ def suggest_candidates(doctype, fy_code, trc_code, vr_no, days_window=15, limit=
 	window_start = frappe.utils.add_days(vr_date, -days_window)
 	window_end = frappe.utils.add_days(vr_date, days_window)
 	amount_field = AMOUNT_FIELD[doctype]
+	party_field = PARTY_FIELD.get(doctype)
+
+	fields = ["name", "posting_date", f"{amount_field} as amount"]
+	if party_field:
+		fields.append(f"{party_field} as party")
 
 	rows = frappe.get_all(
 		doctype,
 		filters={"posting_date": ["between", [window_start, window_end]], "docstatus": 1},
-		fields=["name", "posting_date", f"{amount_field} as amount"],
+		fields=fields,
 		limit=500,
 	)
 
 	target_amount = frappe.utils.flt(voucher.get("amount"))
+	voucher_party = voucher.get("payee_name") or voucher.get("supplier_name") or voucher.get("acc_name")
+	tier_rank = {"high": 0, "medium": 1, "low": 2}
 	for r in rows:
 		r["amount_diff"] = abs(frappe.utils.flt(r["amount"]) - target_amount)
 		r["date_diff"] = abs((frappe.utils.getdate(r["posting_date"]) - vr_date).days)
-	rows.sort(key=lambda r: (r["amount_diff"], r["date_diff"]))
+		r["party_score"] = _party_similarity(voucher_party, r.get("party")) if party_field else None
+		r["confidence"] = _confidence_tier(r["amount_diff"], target_amount, r["date_diff"], r["party_score"])
+	rows.sort(key=lambda r: (tier_rank[r["confidence"]], r["amount_diff"], r["date_diff"]))
 
 	return {"voucher": voucher, "candidates": rows[: frappe.utils.cint(limit) or 10]}
 
@@ -230,7 +288,7 @@ def _classify(trc, vr_no):
 
 @frappe.whitelist()
 def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=None,
-		limit_start=0, limit_page_length=50):
+		target_doctype=None, limit_start=0, limit_page_length=50):
 	_check_role()
 	limit_start = frappe.utils.cint(limit_start)
 	limit_page_length = frappe.utils.cint(limit_page_length) or 50
@@ -278,6 +336,8 @@ def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=No
 				row_status = "attached"
 
 		if status and status != "all" and row_status != status:
+			continue
+		if target_doctype and doctype != target_doctype:
 			continue
 
 		out.append({
@@ -355,11 +415,38 @@ def attach_row(fy_code, trc_code, vr_no, attachment, override_doctype=None, over
 
 	f = save_file(attachment, row["imageobject"], doctype, docname, is_private=0, decode=False)
 	frappe.db.commit()
+	_log_action("Attached", doctype, docname, trc_code, vr_no, attachment, f.name)
 	return {"file_url": f.file_url, "doctype": doctype, "docname": docname}
 
 
 @frappe.whitelist()
-def bulk_attach(trc_code=None, search=None, from_date=None, to_date=None, batch_size=20):
+def detach_row(fy_code, trc_code, vr_no, attachment):
+	"""Undo: remove the File this row's attachment created, so a wrong auto/manual attach can be
+	reversed without going to the target document directly. Logged the same as an attach."""
+	_check_role()
+	doctype, status, docname, candidates = _classify((trc_code or "").strip(), str(vr_no).strip())
+	if status not in ("clean", "attached"):
+		# even if the split/legacy fields have since changed underneath it, an already-attached
+		# row must still resolve to SOME doctype+doc to know what to detach from
+		frappe.throw(_("Cannot determine the target document for this row anymore."))
+
+	file_name = _find_attached_file(doctype, docname, attachment)
+	if not file_name:
+		frappe.throw(_("No attached file found for this row on {0} {1}").format(doctype, docname))
+
+	if not frappe.has_permission(doctype, "write", doc=docname):
+		frappe.throw(_("No write permission on {0} {1}").format(doctype, docname), frappe.PermissionError)
+	if not frappe.has_permission("File", "delete", doc=file_name):
+		frappe.throw(_("No permission to delete this file"), frappe.PermissionError)
+
+	frappe.delete_doc("File", file_name, ignore_permissions=True)
+	frappe.db.commit()
+	_log_action("Detached", doctype, docname, trc_code, vr_no, attachment, file_name)
+	return {"detached": True, "file_name": file_name, "doctype": doctype, "docname": docname}
+
+
+@frappe.whitelist()
+def bulk_attach(trc_code=None, search=None, from_date=None, to_date=None, target_doctype=None, batch_size=20):
 	"""Attach one batch of currently-'clean' (unambiguous single-match) rows under the given
 	filters, each wrapped in its own try/except so one bad row never aborts the rest. Safe to call
 	repeatedly: a row that succeeds flips from 'clean' to 'attached' and drops out of the next
@@ -369,8 +456,8 @@ def bulk_attach(trc_code=None, search=None, from_date=None, to_date=None, batch_
 	_check_role()
 	batch_size = frappe.utils.cint(batch_size) or 20
 
-	page = get_rows(trc_code=trc_code, status="clean", search=search,
-		from_date=from_date, to_date=to_date, limit_start=0, limit_page_length=batch_size)
+	page = get_rows(trc_code=trc_code, status="clean", search=search, from_date=from_date,
+		to_date=to_date, target_doctype=target_doctype, limit_start=0, limit_page_length=batch_size)
 
 	attached, failed = [], []
 	for row in page["rows"]:
@@ -386,6 +473,57 @@ def bulk_attach(trc_code=None, search=None, from_date=None, to_date=None, batch_
 
 	return {"processed": len(page["rows"]), "attached": attached, "failed": failed,
 		"remaining_clean_total": page["total"] - len(attached)}
+
+
+@frappe.whitelist()
+def get_status_counts(trc_code=None, search=None, from_date=None, to_date=None, target_doctype=None):
+	"""One-pass tally for the 'at a glance' summary bar -- same scan/classify as get_rows() but
+	returns counts per status instead of building the full row list, so the summary bar and the
+	table underneath always agree on the same filters without a second expensive round trip."""
+	_check_role()
+	page = get_rows(trc_code=trc_code, search=search, from_date=from_date, to_date=to_date,
+		target_doctype=target_doctype, status="all", limit_start=0, limit_page_length=100000)
+
+	counts = {"clean": 0, "attached": 0, "unmatched": 0, "duplicate": 0,
+		"out_of_scope": 0, "fields_missing": 0}
+	for row in page["rows"]:
+		counts[row["status"]] = counts.get(row["status"], 0) + 1
+	counts["total"] = page["total"]
+	return counts
+
+
+@frappe.whitelist()
+def get_thumbnails(rows):
+	"""Batched small-preview fetch for the table's optional 'Show Thumbnails' mode -- one round
+	trip for the whole visible page instead of one per row. `rows` is a JSON list of
+	{fy_code, trc_code, vr_no, attachment, blob_size}. Skips non-image extensions and anything
+	over the size cap outright (no point paying for a blob transfer the caller will just discard)."""
+	_check_role()
+	if isinstance(rows, str):
+		rows = frappe.parse_json(rows)
+
+	out = {}
+	conn = None
+	for row in rows:
+		ext = os.path.splitext(row.get("attachment") or "")[1].lower()
+		mime = PREVIEWABLE_EXT.get(ext)
+		if not mime or mime == "application/pdf" or frappe.utils.cint(row.get("blob_size")) > 150 * 1024:
+			continue
+		if conn is None:
+			conn = _get_connection()
+		cur = conn.cursor()
+		cur.execute(
+			"SELECT TOP 1 imageobject FROM ATTACHMENT_DETAIL "
+			"WHERE FY_CODE = %(fy)s AND TRC_CODE = %(trc)s AND VR_NO = %(vr)s AND ATTACHMENT = %(att)s",
+			{"fy": row["fy_code"], "trc": row["trc_code"], "vr": row["vr_no"], "att": row["attachment"]},
+		)
+		r = cur.fetchone()
+		if r and r["imageobject"]:
+			key = "||".join([row["fy_code"], row["trc_code"], str(row["vr_no"]), row["attachment"]])
+			out[key] = {"mime": mime, "data": base64.b64encode(r["imageobject"]).decode("ascii")}
+	if conn:
+		conn.close()
+	return out
 
 
 @frappe.whitelist()

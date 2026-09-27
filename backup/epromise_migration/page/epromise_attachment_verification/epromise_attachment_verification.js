@@ -8,6 +8,14 @@ frappe.pages['epromise-attachment-verification'].on_page_load = function (wrappe
 	new AttachmentVerification(page);
 };
 
+const DOCTYPE_OPTIONS = ['Sales Invoice', 'Purchase Invoice', 'Purchase Receipt', 'Payment Entry', 'Journal Entry'];
+
+const CONFIDENCE_META = {
+	high: { label: 'High', color: 'green' },
+	medium: { label: 'Medium', color: 'orange' },
+	low: { label: 'Low', color: 'grey' },
+};
+
 function render_voucher_info_html(v) {
 	if (!v || !v.found) {
 		return '<div class="text-muted">No matching voucher found in the transactional ePromise database for this row.</div>';
@@ -60,6 +68,7 @@ class AttachmentVerification {
 		this.page = page;
 		this.limit_start = 0;
 		this.page_length = 50;
+		this.show_thumbnails = false;
 		this.setup_filters();
 		this.setup_table();
 		this.refresh();
@@ -71,6 +80,12 @@ class AttachmentVerification {
 		this.trc_field = this.page.add_field({
 			label: 'TRC Code', fieldtype: 'Select', fieldname: 'trc_code',
 			options: '\nS01\nS06\nR01\nR04\n350\n111\nIP\nPR\nGRN\nGR\n003\n004\n020\n007',
+			change() { me.limit_start = 0; me.refresh(); },
+		});
+
+		this.doctype_field = this.page.add_field({
+			label: 'Target Doctype (ERPNext)', fieldtype: 'Select', fieldname: 'target_doctype',
+			options: [''].concat(DOCTYPE_OPTIONS).join('\n'),
 			change() { me.limit_start = 0; me.refresh(); },
 		});
 
@@ -105,13 +120,29 @@ class AttachmentVerification {
 			change() { me.limit_start = 0; me.refresh(); },
 		});
 
+		this.thumbnail_field = this.page.add_field({
+			label: 'Show Thumbnails', fieldtype: 'Check', fieldname: 'show_thumbnails',
+			change() { me.show_thumbnails = !!me.thumbnail_field.get_value(); me.refresh(); },
+		});
+
 		this.page.set_primary_action('Refresh', () => this.refresh(), 'refresh');
 		this.page.add_action_item('Bulk Attach (clean matches, current filters)', () => this.bulk_attach());
+	}
+
+	get_filter_args() {
+		return {
+			trc_code: this.trc_field.get_value() || null,
+			target_doctype: this.doctype_field.get_value() || null,
+			search: this.search_field.get_value() || null,
+			from_date: this.from_date_field.get_value() || null,
+			to_date: this.to_date_field.get_value() || null,
+		};
 	}
 
 	setup_table() {
 		this.$wrapper = $(`
 			<div class="epv-wrapper" style="margin-top: 15px;">
+				<div class="epv-status-bar" style="margin-bottom: 12px;"></div>
 				<div class="epv-summary text-muted small" style="margin-bottom: 8px;"></div>
 				<table class="table table-bordered epv-table">
 					<thead>
@@ -123,7 +154,7 @@ class AttachmentVerification {
 							<th style="width: 130px;">Target Doctype</th>
 							<th style="width: 160px;">Matched Doc</th>
 							<th style="width: 150px;">Status</th>
-							<th style="width: 200px;">Actions</th>
+							<th style="width: 220px;">Actions</th>
 						</tr>
 					</thead>
 					<tbody></tbody>
@@ -135,26 +166,63 @@ class AttachmentVerification {
 		this.$tbody = this.$wrapper.find('tbody');
 		this.$summary = this.$wrapper.find('.epv-summary');
 		this.$pagination = this.$wrapper.find('.epv-pagination');
+		this.$status_bar = this.$wrapper.find('.epv-status-bar');
 	}
 
 	refresh() {
 		const me = this;
 		this.$tbody.html('<tr><td colspan="8" class="text-muted">Loading...</td></tr>');
+		this.refresh_status_bar();
 
 		frappe.call({
 			method: 'backup.epromise_migration.attachment_verification.get_rows',
-			args: {
-				trc_code: this.trc_field.get_value() || null,
+			args: Object.assign({}, this.get_filter_args(), {
 				status: this.status_field.get_value() || 'all',
-				search: this.search_field.get_value() || null,
-				from_date: this.from_date_field.get_value() || null,
-				to_date: this.to_date_field.get_value() || null,
 				limit_start: this.limit_start,
 				limit_page_length: this.page_length,
-			},
+			}),
 			callback(r) {
 				me.render(r.message);
 			},
+		});
+	}
+
+	refresh_status_bar() {
+		const me = this;
+		frappe.call({
+			method: 'backup.epromise_migration.attachment_verification.get_status_counts',
+			args: this.get_filter_args(),
+			callback(r) {
+				me.render_status_bar(r.message);
+			},
+		});
+	}
+
+	render_status_bar(counts) {
+		const me = this;
+		const badges = [
+			['clean', 'Ready to attach', 'blue'],
+			['attached', 'Already attached', 'green'],
+			['unmatched', 'No match found', 'orange'],
+			['duplicate', 'Multiple matches', 'red'],
+			['out_of_scope', 'Not migrated', 'grey'],
+			['fields_missing', 'Not migrated on site', 'grey'],
+		];
+		let html = '<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">';
+		badges.forEach(function ([key, label, color]) {
+			html += `<span class="indicator ${color}" style="cursor:pointer;" data-status="${key}">${label}: <b>${counts[key] || 0}</b></span>`;
+		});
+		if (counts.clean) {
+			html += `<button class="btn btn-sm btn-primary epv-bulk-attach-glance">⚡ Bulk Attach all ${counts.clean} Ready-to-attach</button>`;
+		}
+		html += '</div>';
+		this.$status_bar.html(html);
+
+		this.$status_bar.find('[data-status]').on('click', function () {
+			me.status_field.set_value($(this).data('status'));
+		});
+		this.$status_bar.find('.epv-bulk-attach-glance').on('click', function () {
+			me.bulk_attach();
 		});
 	}
 
@@ -173,6 +241,7 @@ class AttachmentVerification {
 		);
 		this.render_pagination();
 		this.bind_row_actions(rows);
+		if (this.show_thumbnails) this.load_thumbnails(rows);
 	}
 
 	render_row(row) {
@@ -188,20 +257,48 @@ class AttachmentVerification {
 			actions += `<button class="btn btn-xs btn-primary epv-attach" data-key="${key}">Attach</button>`;
 		} else if (row.status === 'unmatched' || row.status === 'duplicate') {
 			actions += `<button class="btn btn-xs btn-warning epv-manual" data-key="${key}">Pick target</button>`;
+		} else if (row.status === 'attached') {
+			actions += `<button class="btn btn-xs btn-danger epv-detach" data-key="${key}">Detach</button>`;
 		}
+
+		const attachment_cell = `<span class="epv-thumb-slot" data-key="${key}">${frappe.utils.escape_html(row.attachment)}</span>`;
 
 		return `
 			<tr data-key="${key}">
 				<td>${frappe.utils.escape_html(row.trc_code)}</td>
 				<td>${frappe.utils.escape_html(row.vr_no)}</td>
 				<td>${frappe.datetime.str_to_user(row.vr_date) || ''}</td>
-				<td title="${frappe.utils.escape_html(row.attachment)}">${frappe.utils.escape_html(row.attachment)}</td>
+				<td title="${frappe.utils.escape_html(row.attachment)}">${attachment_cell}</td>
 				<td>${row.doctype || '-'}</td>
 				<td>${matched_html}</td>
 				<td><span class="indicator ${meta.color}">${meta.label}</span></td>
 				<td>${actions}</td>
 			</tr>
 		`;
+	}
+
+	load_thumbnails(rows) {
+		const eligible = rows.filter(function (row) {
+			const ext = (row.attachment.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+			return ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext) && (row.blob_size || 0) <= 150 * 1024;
+		});
+		if (!eligible.length) return;
+
+		frappe.call({
+			method: 'backup.epromise_migration.attachment_verification.get_thumbnails',
+			args: { rows: eligible.map((row) => ({
+				fy_code: row.fy_code, trc_code: row.trc_code, vr_no: row.vr_no,
+				attachment: row.attachment, blob_size: row.blob_size,
+			})) },
+			callback: (r) => {
+				const thumbs = r.message || {};
+				Object.keys(thumbs).forEach((key) => {
+					const t = thumbs[key];
+					this.$tbody.find(`.epv-thumb-slot[data-key="${CSS.escape(key)}"]`)
+						.prepend(`<img src="data:${t.mime};base64,${t.data}" style="max-height:40px; max-width:60px; margin-right:6px; vertical-align:middle;" />`);
+				});
+			},
+		});
 	}
 
 	render_pagination() {
@@ -238,6 +335,9 @@ class AttachmentVerification {
 		});
 		this.$tbody.find('.epv-manual').on('click', function () {
 			me.manual_pick(by_key[$(this).data('key')]);
+		});
+		this.$tbody.find('.epv-detach').on('click', function () {
+			me.confirm_detach(by_key[$(this).data('key')]);
 		});
 	}
 
@@ -291,6 +391,24 @@ class AttachmentVerification {
 		);
 	}
 
+	confirm_detach(row) {
+		const me = this;
+		frappe.confirm(
+			`Remove <b>${frappe.utils.escape_html(row.attachment)}</b> from ${row.doctype} <b>${frappe.utils.escape_html(row.matched_name)}</b>? This deletes the File record.`,
+			() => {
+				frappe.call({
+					method: 'backup.epromise_migration.attachment_verification.detach_row',
+					args: { fy_code: row.fy_code, trc_code: row.trc_code, vr_no: row.vr_no, attachment: row.attachment },
+					freeze: true,
+					callback() {
+						frappe.show_alert({ message: 'Detached.', indicator: 'orange' });
+						me.refresh();
+					},
+				});
+			}
+		);
+	}
+
 	manual_pick(row) {
 		const me = this;
 		const d = new frappe.ui.Dialog({
@@ -300,14 +418,14 @@ class AttachmentVerification {
 				{ label: 'ePromise Voucher', fieldname: 'voucher_html', fieldtype: 'HTML' },
 				{ fieldname: 'col_break_1', fieldtype: 'Column Break' },
 				{ label: 'Doctype', fieldname: 'doctype', fieldtype: 'Select',
-					options: ['Sales Invoice', 'Purchase Invoice', 'Purchase Receipt', 'Payment Entry', 'Journal Entry'].join('\n'),
+					options: DOCTYPE_OPTIONS.join('\n'),
 					default: row.doctype || undefined, reqd: 1,
 					change() { me.refresh_suggestions(d, row); } },
 				{ label: 'Document Name', fieldname: 'docname', fieldtype: 'Dynamic Link',
 					options: 'doctype', reqd: 1,
 					description: row.candidates && row.candidates.length
 						? `Candidates from auto-match: ${row.candidates.join(', ')}` : undefined },
-				{ fieldname: 'sec_break_1', fieldtype: 'Section Break', label: 'Fuzzy match suggestions (by amount + date)' },
+				{ fieldname: 'sec_break_1', fieldtype: 'Section Break', label: 'Fuzzy match suggestions (amount + date + party)' },
 				{ fieldname: 'suggestions_html', fieldtype: 'HTML' },
 			],
 			primary_action_label: 'Attach',
@@ -355,14 +473,18 @@ class AttachmentVerification {
 					return;
 				}
 				const html = '<table class="table table-bordered">' +
-					'<thead><tr><th>Document</th><th>Date</th><th>Amount</th><th>Amount diff</th><th>Days diff</th><th></th></tr></thead><tbody>' +
+					'<thead><tr><th>Confidence</th><th>Document</th><th>Date</th><th>Amount</th><th>Amount diff</th><th>Days diff</th><th>Party match</th><th></th></tr></thead><tbody>' +
 					candidates.map(function (c) {
+						const conf = CONFIDENCE_META[c.confidence] || CONFIDENCE_META.low;
+						const party_pct = c.party_score != null ? Math.round(c.party_score * 100) + '%' : '-';
 						return '<tr>' +
+							'<td><span class="indicator ' + conf.color + '">' + conf.label + '</span></td>' +
 							'<td>' + frappe.utils.escape_html(c.name) + '</td>' +
 							'<td>' + frappe.datetime.str_to_user(c.posting_date) + '</td>' +
 							'<td>' + frappe.format(c.amount, { fieldtype: 'Currency' }) + '</td>' +
 							'<td>' + frappe.format(c.amount_diff, { fieldtype: 'Currency' }) + '</td>' +
 							'<td>' + c.date_diff + '</td>' +
+							'<td>' + party_pct + '</td>' +
 							'<td><button class="btn btn-xs btn-default epv-pick-suggestion" data-name="' + frappe.utils.escape_html(c.name) + '">Use this</button></td>' +
 							'</tr>';
 					}).join('') + '</tbody></table>';
@@ -376,12 +498,7 @@ class AttachmentVerification {
 
 	bulk_attach() {
 		const me = this;
-		const filter_args = {
-			trc_code: this.trc_field.get_value() || null,
-			search: this.search_field.get_value() || null,
-			from_date: this.from_date_field.get_value() || null,
-			to_date: this.to_date_field.get_value() || null,
-		};
+		const filter_args = this.get_filter_args();
 
 		frappe.call({
 			method: 'backup.epromise_migration.attachment_verification.get_rows',
