@@ -232,7 +232,8 @@ class AttachmentVerification {
 				{ label: 'Doctype', fieldname: 'doctype', fieldtype: 'Select',
 					options: ['Sales Invoice', 'Purchase Invoice', 'Purchase Receipt', 'Payment Entry', 'Journal Entry'].join('\n'),
 					default: row.doctype || undefined, reqd: 1 },
-				{ label: 'Document Name', fieldname: 'docname', fieldtype: 'Data', reqd: 1,
+				{ label: 'Document Name', fieldname: 'docname', fieldtype: 'Dynamic Link',
+					options: 'doctype', reqd: 1,
 					description: row.candidates && row.candidates.length
 						? `Candidates from auto-match: ${row.candidates.join(', ')}` : undefined },
 			],
