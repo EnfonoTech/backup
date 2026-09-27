@@ -12,6 +12,7 @@
   "mssql_database",
   "mssql_username",
   "mssql_password",
+  "attachment_mssql_database",
   "erpnext_section",
   "erpnext_company",
   "column_break_2",
@@ -81,6 +82,12 @@
    "fieldname": "mssql_password",
    "fieldtype": "Password",
    "label": "Password"
+  },
+  {
+   "fieldname": "attachment_mssql_database",
+   "fieldtype": "Data",
+   "label": "Attachment Database Name",
+   "description": "Separate database on the same SQL Server holding ATTACHMENT_DETAIL (e.g. Attachment_Bahrain26). Used by the ePromise Attachment Verification page — leave blank to reuse Database Name above."
   },
   {
    "fieldname": "erpnext_section",

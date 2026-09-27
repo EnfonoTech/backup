@@ -1,0 +1,9 @@
+{
+ "doctype": "Page",
+ "module": "ePromise Migration",
+ "name": "epromise-attachment-verification",
+ "page_name": "epromise-attachment-verification",
+ "roles": [{"role": "System Manager"}],
+ "standard": "Yes",
+ "title": "ePromise Attachment Verification"
+}
