@@ -563,11 +563,13 @@ class AttachmentVerification {
 		function step() {
 			frappe.call({
 				method: 'backup.epromise_migration.attachment_verification.bulk_attach',
-				// 2026-09-28: bumped from 20 -- bulk_attach's own per-row MSSQL connection was the
-				// actual bottleneck (fixed server-side, one shared connection per batch now), so a
-				// bigger batch means fewer round trips of get_rows' own full-table reclassify scan
-				// instead of fewer rows attached per call.
-				args: Object.assign({}, filter_args, { batch_size: 100 }),
+				// 2026-09-28: bumped from 20 to 100, then back down to 50 within the hour -- the
+				// per-row MSSQL CONNECTION overhead is gone (one shared connection per batch now),
+				// but real per-row cost remains (save_file + doc validation), measured live at
+				// ~1.4s/row -- a 100-row batch (~140s) exceeds gunicorn's own 120s worker timeout
+				// (-t 120), so it can STILL "Request Timed Out" at a bigger threshold. 50 rows
+				// (~70s) keeps a real margin under that.
+				args: Object.assign({}, filter_args, { batch_size: 50 }),
 				callback(r) {
 					const msg = r.message;
 					attached_count += msg.attached.length;
