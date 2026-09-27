@@ -8,6 +8,25 @@ frappe.pages['epromise-attachment-verification'].on_page_load = function (wrappe
 	new AttachmentVerification(page);
 };
 
+function render_voucher_info_html(v) {
+	if (!v || !v.found) {
+		return '<div class="text-muted">No matching voucher found in the transactional ePromise database for this row.</div>';
+	}
+	const rows = [
+		['Voucher Date', frappe.datetime.str_to_user(v.vr_date)],
+		['Amount', v.amount != null ? frappe.format(v.amount, { fieldtype: 'Currency' }) : '-'],
+		['Particulars', v.particulars || '-'],
+		['Payee Name', v.payee_name || '-'],
+		['Account', v.acc_name || '-'],
+		['Bill No', v.bill_no || '-'],
+		['Bill Date', v.bill_date ? frappe.datetime.str_to_user(v.bill_date) : '-'],
+	];
+	return '<table class="table table-bordered">' + rows.map(function (pair) {
+		return '<tr><th style="width:140px;">' + pair[0] + '</th><td>' +
+			frappe.utils.escape_html(String(pair[1])) + '</td></tr>';
+	}).join('') + '</table>';
+}
+
 const STATUS_META = {
 	clean: { label: 'Ready to attach', color: 'blue' },
 	attached: { label: 'Already attached', color: 'green' },
@@ -57,6 +76,16 @@ class AttachmentVerification {
 			change: frappe.utils.debounce(() => { me.limit_start = 0; me.refresh(); }, 400),
 		});
 
+		this.from_date_field = this.page.add_field({
+			label: 'From Date', fieldtype: 'Date', fieldname: 'from_date',
+			change() { me.limit_start = 0; me.refresh(); },
+		});
+
+		this.to_date_field = this.page.add_field({
+			label: 'To Date', fieldtype: 'Date', fieldname: 'to_date',
+			change() { me.limit_start = 0; me.refresh(); },
+		});
+
 		this.page.set_primary_action('Refresh', () => this.refresh(), 'refresh');
 	}
 
@@ -74,7 +103,7 @@ class AttachmentVerification {
 							<th style="width: 130px;">Target Doctype</th>
 							<th style="width: 160px;">Matched Doc</th>
 							<th style="width: 150px;">Status</th>
-							<th style="width: 160px;">Actions</th>
+							<th style="width: 200px;">Actions</th>
 						</tr>
 					</thead>
 					<tbody></tbody>
@@ -98,6 +127,8 @@ class AttachmentVerification {
 				trc_code: this.trc_field.get_value() || null,
 				status: this.status_field.get_value() || 'all',
 				search: this.search_field.get_value() || null,
+				from_date: this.from_date_field.get_value() || null,
+				to_date: this.to_date_field.get_value() || null,
 				limit_start: this.limit_start,
 				limit_page_length: this.page_length,
 			},
@@ -132,6 +163,7 @@ class AttachmentVerification {
 			: (row.candidates && row.candidates.length ? `${row.candidates.length} candidates` : '-');
 
 		let actions = `<button class="btn btn-xs btn-default epv-preview" data-key="${key}">Preview</button> `;
+		actions += `<button class="btn btn-xs btn-default epv-info" data-key="${key}">Info</button> `;
 		if (row.status === 'clean') {
 			actions += `<button class="btn btn-xs btn-primary epv-attach" data-key="${key}">Attach</button>`;
 		} else if (row.status === 'unmatched' || row.status === 'duplicate') {
@@ -178,6 +210,9 @@ class AttachmentVerification {
 		this.$tbody.find('.epv-preview').on('click', function () {
 			me.show_preview(by_key[$(this).data('key')]);
 		});
+		this.$tbody.find('.epv-info').on('click', function () {
+			me.show_voucher_info(by_key[$(this).data('key')]);
+		});
 		this.$tbody.find('.epv-attach').on('click', function () {
 			me.confirm_attach(by_key[$(this).data('key')]);
 		});
@@ -206,6 +241,18 @@ class AttachmentVerification {
 		});
 	}
 
+	show_voucher_info(row) {
+		frappe.call({
+			method: 'backup.epromise_migration.attachment_verification.get_voucher_info',
+			args: { fy_code: row.fy_code, trc_code: row.trc_code, vr_no: row.vr_no },
+			callback(r) {
+				const d = new frappe.ui.Dialog({ title: `ePromise voucher ${row.trc_code}/${row.vr_no}` });
+				d.$body.html(render_voucher_info_html(r.message));
+				d.show();
+			},
+		});
+	}
+
 	confirm_attach(row) {
 		const me = this;
 		frappe.confirm(
@@ -228,14 +275,20 @@ class AttachmentVerification {
 		const me = this;
 		const d = new frappe.ui.Dialog({
 			title: `Manually attach: ${row.attachment}`,
+			size: 'large',
 			fields: [
+				{ label: 'ePromise Voucher', fieldname: 'voucher_html', fieldtype: 'HTML' },
+				{ fieldname: 'col_break_1', fieldtype: 'Column Break' },
 				{ label: 'Doctype', fieldname: 'doctype', fieldtype: 'Select',
 					options: ['Sales Invoice', 'Purchase Invoice', 'Purchase Receipt', 'Payment Entry', 'Journal Entry'].join('\n'),
-					default: row.doctype || undefined, reqd: 1 },
+					default: row.doctype || undefined, reqd: 1,
+					change() { me.refresh_suggestions(d, row); } },
 				{ label: 'Document Name', fieldname: 'docname', fieldtype: 'Dynamic Link',
 					options: 'doctype', reqd: 1,
 					description: row.candidates && row.candidates.length
 						? `Candidates from auto-match: ${row.candidates.join(', ')}` : undefined },
+				{ fieldname: 'sec_break_1', fieldtype: 'Section Break', label: 'Fuzzy match suggestions (by amount + date)' },
+				{ fieldname: 'suggestions_html', fieldtype: 'HTML' },
 			],
 			primary_action_label: 'Attach',
 			primary_action(values) {
@@ -255,5 +308,49 @@ class AttachmentVerification {
 			},
 		});
 		d.show();
+
+		frappe.call({
+			method: 'backup.epromise_migration.attachment_verification.get_voucher_info',
+			args: { fy_code: row.fy_code, trc_code: row.trc_code, vr_no: row.vr_no },
+			callback(r) {
+				d.fields_dict.voucher_html.$wrapper.html(render_voucher_info_html(r.message));
+			},
+		});
+
+		this.refresh_suggestions(d, row);
+	}
+
+	refresh_suggestions(d, row) {
+		const doctype = d.get_value('doctype');
+		if (!doctype) return;
+		d.fields_dict.suggestions_html.$wrapper.html('<div class="text-muted">Loading suggestions...</div>');
+
+		frappe.call({
+			method: 'backup.epromise_migration.attachment_verification.suggest_candidates',
+			args: { doctype, fy_code: row.fy_code, trc_code: row.trc_code, vr_no: row.vr_no },
+			callback(r) {
+				const candidates = (r.message && r.message.candidates) || [];
+				if (!candidates.length) {
+					d.fields_dict.suggestions_html.$wrapper.html('<div class="text-muted">No same-doctype documents found near this voucher\'s date.</div>');
+					return;
+				}
+				const html = '<table class="table table-bordered">' +
+					'<thead><tr><th>Document</th><th>Date</th><th>Amount</th><th>Amount diff</th><th>Days diff</th><th></th></tr></thead><tbody>' +
+					candidates.map(function (c) {
+						return '<tr>' +
+							'<td>' + frappe.utils.escape_html(c.name) + '</td>' +
+							'<td>' + frappe.datetime.str_to_user(c.posting_date) + '</td>' +
+							'<td>' + frappe.format(c.amount, { fieldtype: 'Currency' }) + '</td>' +
+							'<td>' + frappe.format(c.amount_diff, { fieldtype: 'Currency' }) + '</td>' +
+							'<td>' + c.date_diff + '</td>' +
+							'<td><button class="btn btn-xs btn-default epv-pick-suggestion" data-name="' + frappe.utils.escape_html(c.name) + '">Use this</button></td>' +
+							'</tr>';
+					}).join('') + '</tbody></table>';
+				d.fields_dict.suggestions_html.$wrapper.html(html);
+				d.fields_dict.suggestions_html.$wrapper.find('.epv-pick-suggestion').on('click', function () {
+					d.set_value('docname', $(this).data('name'));
+				});
+			},
+		});
 	}
 }

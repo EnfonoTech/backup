@@ -33,6 +33,13 @@ PREVIEWABLE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/p
 
 MAX_PREVIEW_BYTES = 8 * 1024 * 1024
 
+# amount field to compare against the ePromise voucher's LOCAL_CUR_AMT when fuzzy-suggesting a
+# manual-pick target -- date field is posting_date on every one of these doctypes.
+AMOUNT_FIELD = {
+	"Sales Invoice": "grand_total", "Purchase Invoice": "grand_total", "Purchase Receipt": "grand_total",
+	"Payment Entry": "paid_amount", "Journal Entry": "total_debit",
+}
+
 
 def _check_role():
 	if "System Manager" not in frappe.get_roles():
@@ -61,6 +68,99 @@ def _get_connection():
 	)
 
 
+def _get_transactional_connection():
+	"""Connect to the main dichdata database (Database Name, NOT Attachment Database Name) --
+	used only to pull the voucher's own amount/date for fuzzy-matching, since ATTACHMENT_DETAIL
+	itself carries no amount."""
+	import pymssql
+
+	settings = frappe.get_single("ePromise Settings")
+	host = (settings.mssql_host or "").strip()
+	port = int(settings.mssql_port or 1433)
+	database = (settings.mssql_database or "").strip()
+	user = (settings.mssql_username or "").strip()
+	password = settings.get_password("mssql_password") or ""
+
+	if not host or not database or not user:
+		frappe.throw(_("ePromise Settings is missing SQL Server Host, Username, or Database Name."))
+
+	return pymssql.connect(
+		server=host, port=port, database=database, user=user, password=password,
+		as_dict=True, login_timeout=15,
+	)
+
+
+def _get_voucher_reference(fy_code, trc_code, vr_no):
+	"""Pull the ePromise voucher's own identifying fields from dichdata (the transactional
+	database, NOT the attachment one) -- amount + date for fuzzy scoring, plus the descriptive
+	fields (particulars/payee/account/bill no) a human reviewer needs to visually confirm a
+	manual pick, since ATTACHMENT_DETAIL itself carries none of this."""
+	conn = _get_transactional_connection()
+	cur = conn.cursor()
+	cur.execute(
+		"SELECT TOP 1 VR_DATE, LOCAL_CUR_AMT, ACC_AMT, PARTICULARS, PAYEE_NAME, ACC_NAME, "
+		"BILL_NO, BILL_DATE FROM dichdata "
+		"WHERE FY_CODE = %(fy)s AND TRC_CODE = %(trc)s AND CAST(VR_NO AS VARCHAR(50)) = %(vr)s",
+		{"fy": fy_code, "trc": trc_code, "vr": str(vr_no)},
+	)
+	row = cur.fetchone()
+	conn.close()
+	if not row:
+		return None
+	return {
+		"vr_date": row["VR_DATE"],
+		"amount": row["LOCAL_CUR_AMT"] if row["LOCAL_CUR_AMT"] is not None else row["ACC_AMT"],
+		"particulars": row["PARTICULARS"], "payee_name": row["PAYEE_NAME"],
+		"acc_name": row["ACC_NAME"], "bill_no": row["BILL_NO"], "bill_date": row["BILL_DATE"],
+	}
+
+
+@frappe.whitelist()
+def get_voucher_info(fy_code, trc_code, vr_no):
+	"""Standalone lookup so any row (even a clean match) can show its ePromise voucher context
+	for a sanity check before attaching."""
+	_check_role()
+	voucher = _get_voucher_reference(fy_code, trc_code, vr_no)
+	if not voucher:
+		return {"found": False}
+	voucher["found"] = True
+	return voucher
+
+
+@frappe.whitelist()
+def suggest_candidates(doctype, fy_code, trc_code, vr_no, days_window=15, limit=10):
+	"""Fuzzy-match suggestions for the manual-pick dialog: rank same-doctype submitted documents
+	near the voucher's own date by how close their amount is to the voucher's LOCAL_CUR_AMT."""
+	_check_role()
+	if doctype not in AMOUNT_FIELD:
+		frappe.throw(_("Unsupported doctype for fuzzy matching: {0}").format(doctype))
+
+	voucher = _get_voucher_reference(fy_code, trc_code, vr_no)
+	if not voucher or not voucher.get("vr_date"):
+		return {"voucher": voucher, "candidates": []}
+
+	days_window = frappe.utils.cint(days_window) or 15
+	vr_date = frappe.utils.getdate(voucher["vr_date"])
+	window_start = frappe.utils.add_days(vr_date, -days_window)
+	window_end = frappe.utils.add_days(vr_date, days_window)
+	amount_field = AMOUNT_FIELD[doctype]
+
+	rows = frappe.get_all(
+		doctype,
+		filters={"posting_date": ["between", [window_start, window_end]], "docstatus": 1},
+		fields=["name", "posting_date", f"{amount_field} as amount"],
+		limit=500,
+	)
+
+	target_amount = frappe.utils.flt(voucher.get("amount"))
+	for r in rows:
+		r["amount_diff"] = abs(frappe.utils.flt(r["amount"]) - target_amount)
+		r["date_diff"] = abs((frappe.utils.getdate(r["posting_date"]) - vr_date).days)
+	rows.sort(key=lambda r: (r["amount_diff"], r["date_diff"]))
+
+	return {"voucher": voucher, "candidates": rows[: frappe.utils.cint(limit) or 10]}
+
+
 def _classify(trc, vr_no):
 	"""Return (doctype_or_None, status, matched_name_or_None, candidates)."""
 	doctype = ROUTING.get(trc)
@@ -86,7 +186,8 @@ def _classify(trc, vr_no):
 
 
 @frappe.whitelist()
-def get_rows(trc_code=None, status=None, search=None, limit_start=0, limit_page_length=50):
+def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=None,
+		limit_start=0, limit_page_length=50):
 	_check_role()
 	limit_start = frappe.utils.cint(limit_start)
 	limit_page_length = frappe.utils.cint(limit_page_length) or 50
@@ -95,8 +196,10 @@ def get_rows(trc_code=None, status=None, search=None, limit_start=0, limit_page_
 	cur = conn.cursor()
 
 	# NOTE: only STATIC, hardcoded clause fragments are string-joined below (never user input) --
-	# every actual value (trc_code, search) goes through a %(name)s placeholder bound by cur.execute.
-	where_clauses = ["TRC_CODE <> 'EMP'", "imageobject IS NOT NULL"]
+	# every actual value (trc_code, search, from_date, to_date) goes through a %(name)s placeholder
+	# bound by cur.execute. "See all" = no trc_code/status/date filters at all; imageobject IS NOT
+	# NULL stays mandatory since a row with no blob has nothing to preview or attach.
+	where_clauses = ["imageobject IS NOT NULL"]
 	params = {}
 	if trc_code:
 		where_clauses.append("TRC_CODE = %(trc_code)s")
@@ -104,6 +207,12 @@ def get_rows(trc_code=None, status=None, search=None, limit_start=0, limit_page_
 	if search:
 		where_clauses.append("(ATTACHMENT LIKE %(search)s OR CAST(VR_NO AS VARCHAR(50)) LIKE %(search)s)")
 		params["search"] = "%" + search + "%"
+	if from_date:
+		where_clauses.append("CAST(vr_date AS DATE) >= %(from_date)s")
+		params["from_date"] = from_date
+	if to_date:
+		where_clauses.append("CAST(vr_date AS DATE) <= %(to_date)s")
+		params["to_date"] = to_date
 
 	where_sql = " AND ".join(where_clauses)
 	query = (
