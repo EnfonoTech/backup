@@ -162,21 +162,38 @@ def suggest_candidates(doctype, fy_code, trc_code, vr_no, days_window=15, limit=
 
 
 def _classify(trc, vr_no):
-	"""Return (doctype_or_None, status, matched_name_or_None, candidates)."""
+	"""Return (doctype_or_None, status, matched_name_or_None, candidates).
+
+	Two migration eras coexist across sites (confirmed live on sft-uat, 2026-09-27): the CURRENT
+	importer writes separate epromise_trc_code + epromise_vr_no fields, but an EARLIER era (still
+	the only one populated on sft-uat: 24116 Sales Invoice / 1014 Purchase Invoice / 1008 Purchase
+	Receipt / 1113 Payment Entry / 3302 Journal Entry rows, split fields either absent or 100%
+	empty) wrote a single combined `epromise_vr` field as "{TRC}|{VR_NO}" instead. Try the split
+	pair first, then fall back to the legacy combined field before giving up -- never guess which
+	era a given site is on."""
 	doctype = ROUTING.get(trc)
 	if not doctype:
 		return None, "out_of_scope", None, []
 
 	meta = frappe.get_meta(doctype)
-	if not (meta.has_field("epromise_trc_code") and meta.has_field("epromise_vr_no")):
-		# the migration importer for this doctype has never run on this site (e.g. sft-uat,
-		# which has no migrated ePromise data at all) -- the custom fields only get created
-		# when that importer actually runs, not via a plain bench migrate.
+	has_split = meta.has_field("epromise_trc_code") and meta.has_field("epromise_vr_no")
+	has_legacy = meta.has_field("epromise_vr")
+
+	if not has_split and not has_legacy:
+		# the migration importer for this doctype has never run on this site at all -- the
+		# custom fields only get created when that importer actually runs, not via bench migrate.
 		return doctype, "fields_missing", None, []
 
-	matches = frappe.get_all(
-		doctype, filters={"epromise_trc_code": trc, "epromise_vr_no": vr_no}, pluck="name"
-	)
+	matches = []
+	if has_split:
+		matches = frappe.get_all(
+			doctype, filters={"epromise_trc_code": trc, "epromise_vr_no": vr_no}, pluck="name"
+		)
+	if not matches and has_legacy:
+		matches = frappe.get_all(
+			doctype, filters={"epromise_vr": f"{trc}|{vr_no}"}, pluck="name"
+		)
+
 	if not matches:
 		return doctype, "unmatched", None, []
 	if len(matches) > 1:
