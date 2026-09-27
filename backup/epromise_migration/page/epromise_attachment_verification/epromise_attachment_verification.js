@@ -296,17 +296,31 @@ class AttachmentVerification {
 
 	render_pagination() {
 		this.$pagination.empty();
+
+		const $left = $('<div></div>').appendTo(this.$pagination);
 		if (this.limit_start > 0) {
 			$('<button class="btn btn-xs btn-default">Previous</button>')
 				.on('click', () => { this.limit_start = Math.max(0, this.limit_start - this.page_length); this.refresh(); })
-				.appendTo(this.$pagination);
-		} else {
-			$('<span></span>').appendTo(this.$pagination);
+				.appendTo($left);
 		}
+
+		// Standard list-view-style page-size picker -- same idea as the desk list view's own
+		// 20/100/500/2500 row, sized to this page's own default (50) instead.
+		const $right = $('<div class="btn-group"></div>').appendTo(this.$pagination);
+		[50, 100, 500].forEach((size) => {
+			$(`<button class="btn btn-xs ${size === this.page_length ? 'btn-primary' : 'btn-default'}">${size}</button>`)
+				.on('click', () => {
+					if (size === this.page_length) return;
+					this.page_length = size;
+					this.limit_start = 0;
+					this.refresh();
+				})
+				.appendTo($right);
+		});
 		if (this.limit_start + this.page_length < this.total) {
-			$('<button class="btn btn-xs btn-default">Next</button>')
+			$('<button class="btn btn-xs btn-default" style="margin-left:8px;">Next</button>')
 				.on('click', () => { this.limit_start += this.page_length; this.refresh(); })
-				.appendTo(this.$pagination);
+				.appendTo($right);
 		}
 	}
 
@@ -417,7 +431,8 @@ class AttachmentVerification {
 				{ label: 'Document Name', fieldname: 'docname', fieldtype: 'Dynamic Link',
 					options: 'doctype', reqd: 1,
 					description: row.candidates && row.candidates.length
-						? `Candidates from auto-match: ${row.candidates.join(', ')}` : undefined },
+						? `Candidates from auto-match: ${row.candidates.map((c) => `${c.doctype} ${c.name}`).join(', ')}`
+						: undefined },
 				{ fieldname: 'sec_break_1', fieldtype: 'Section Break', label: 'Fuzzy match suggestions (amount + date + party)' },
 				{ fieldname: 'suggestions_html', fieldtype: 'HTML' },
 			],

@@ -21,12 +21,22 @@ import frappe
 from frappe import _
 from frappe.utils.file_manager import save_file
 
+#: trc_code -> ordered list of candidate ERPNext doctypes to search for a match. Almost always
+#: one doctype, EXCEPT 003/004 (cash payment / cash receipt vouchers): payment_importer.py's own
+#: builders try `_build_payment_entry_from_dicsdata(...) or _build_journal_entry_from_voucher(...)`
+#: -- a real fallback chain at IMPORT time, not a fixed target -- so a given 003/004 voucher can
+#: land as EITHER a Payment Entry or a Journal Entry, decided per-voucher (multi-party, missing
+#: party resolution, etc. push it to JE). A single-doctype ROUTING here silently mis-classified
+#: every 003/004 that landed in JE as "no match found" -- confirmed live (2026-09-28, sft prod):
+#: of 1141 003/004 rows the old single-doctype lookup called unmatched, 1140 were sitting in
+#: Journal Entry all along, findable by the SAME epromise_vr legacy key. _classify/_classify_bulk
+#: below search every candidate in order and report whichever one actually has the match.
 ROUTING = {
-	"S01": "Sales Invoice", "S06": "Sales Invoice", "R01": "Sales Invoice", "R04": "Sales Invoice",
-	"350": "Purchase Invoice", "111": "Purchase Invoice", "IP": "Purchase Invoice", "PR": "Purchase Invoice",
-	"GRN": "Purchase Receipt", "GR": "Purchase Receipt",
-	"003": "Payment Entry", "004": "Payment Entry",
-	"020": "Journal Entry", "007": "Journal Entry",
+	"S01": ["Sales Invoice"], "S06": ["Sales Invoice"], "R01": ["Sales Invoice"], "R04": ["Sales Invoice"],
+	"350": ["Purchase Invoice"], "111": ["Purchase Invoice"], "IP": ["Purchase Invoice"], "PR": ["Purchase Invoice"],
+	"GRN": ["Purchase Receipt"], "GR": ["Purchase Receipt"],
+	"003": ["Payment Entry", "Journal Entry"], "004": ["Payment Entry", "Journal Entry"],
+	"020": ["Journal Entry"], "007": ["Journal Entry"],
 }
 
 PREVIEWABLE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -256,36 +266,49 @@ def _classify(trc, vr_no):
 	Receipt / 1113 Payment Entry / 3302 Journal Entry rows, split fields either absent or 100%
 	empty) wrote a single combined `epromise_vr` field as "{TRC}|{VR_NO}" instead. Try the split
 	pair first, then fall back to the legacy combined field before giving up -- never guess which
-	era a given site is on."""
-	doctype = ROUTING.get(trc)
-	if not doctype:
+	era a given site is on.
+
+	ROUTING now maps a trc to a LIST of candidate doctypes (003/004 can be either Payment Entry or
+	Journal Entry -- see ROUTING's own docstring); every candidate is searched and every match
+	collected before deciding clean/unmatched/duplicate, across doctypes."""
+	doctypes = ROUTING.get(trc)
+	if not doctypes:
 		return None, "out_of_scope", None, []
 
-	meta = frappe.get_meta(doctype)
-	has_split = meta.has_field("epromise_trc_code") and meta.has_field("epromise_vr_no")
-	has_legacy = meta.has_field("epromise_vr")
+	all_matches = []
+	fields_missing_doctypes = set()
+	for doctype in doctypes:
+		meta = frappe.get_meta(doctype)
+		has_split = meta.has_field("epromise_trc_code") and meta.has_field("epromise_vr_no")
+		has_legacy = meta.has_field("epromise_vr")
 
-	if not has_split and not has_legacy:
-		# the migration importer for this doctype has never run on this site at all -- the
-		# custom fields only get created when that importer actually runs, not via bench migrate.
-		return doctype, "fields_missing", None, []
+		if not has_split and not has_legacy:
+			# the migration importer for THIS candidate doctype has never run on this site at all
+			# -- the custom fields only get created when that importer actually runs, not via
+			# bench migrate. Other candidates for this trc are still checked below.
+			fields_missing_doctypes.add(doctype)
+			continue
 
-	matches = []
-	if has_split:
-		matches = frappe.get_all(
-			doctype, filters={"epromise_trc_code": trc, "epromise_vr_no": vr_no}, pluck="name"
-		)
-	if not matches and has_legacy:
-		matches = frappe.get_all(
-			doctype, filters={"epromise_vr": f"{trc}|{vr_no}"}, pluck="name"
-		)
+		matches = []
+		if has_split:
+			matches = frappe.get_all(
+				doctype, filters={"epromise_trc_code": trc, "epromise_vr_no": vr_no}, pluck="name"
+			)
+		if not matches and has_legacy:
+			matches = frappe.get_all(
+				doctype, filters={"epromise_vr": f"{trc}|{vr_no}"}, pluck="name"
+			)
+		all_matches.extend((doctype, name) for name in matches)
 
-	if not matches:
-		return doctype, "unmatched", None, []
-	if len(matches) > 1:
-		return doctype, "duplicate", None, matches
+	if not all_matches:
+		if fields_missing_doctypes == set(doctypes):
+			return doctypes[0], "fields_missing", None, []
+		return doctypes[0], "unmatched", None, []
+	if len(all_matches) > 1:
+		return all_matches[0][0], "duplicate", None, [{"doctype": d, "name": n} for d, n in all_matches]
 
-	return doctype, "clean", matches[0], []
+	doctype, name = all_matches[0]
+	return doctype, "clean", name, []
 
 
 def _classify_bulk(pairs):
@@ -293,27 +316,38 @@ def _classify_bulk(pairs):
 	fields + legacy fallback) instead of _classify()'s 1-2 queries PER PAIR. get_rows() scans every
 	attachment row on every page load/refresh (often 1000s of rows) -- calling _classify() in that
 	loop was the actual cause of the page feeling slow/hung: a few thousand synchronous MySQL round
-	trips per refresh. Returns {(trc, vr): (doctype, status, matched_name, candidates)}."""
-	result = {}
-	by_doctype = {}
-	for trc, vr in pairs:
-		doctype = ROUTING.get(trc)
-		if not doctype:
-			result[(trc, vr)] = (None, "out_of_scope", None, [])
-			continue
-		by_doctype.setdefault(doctype, set()).add((trc, vr))
+	trips per refresh. Returns {(trc, vr): (doctype, status, matched_name, candidates)}.
 
-	for doctype, trc_vr_set in by_doctype.items():
+	A trc can route to MULTIPLE candidate doctypes (003/004 -- see ROUTING's own docstring), so
+	each candidate doctype is queried across every pair that lists it, and matches from every
+	candidate are merged per pair before deciding clean/unmatched/duplicate/fields_missing."""
+	result = {}
+	candidate_doctypes_by_pair = {}
+	pairs_by_doctype = {}
+	for trc, vr in pairs:
+		doctypes = ROUTING.get(trc)
+		if not doctypes:
+			result[(trc, vr)] = (None, "out_of_scope", None, [])
+			candidate_doctypes_by_pair[(trc, vr)] = None
+			continue
+		candidate_doctypes_by_pair[(trc, vr)] = doctypes
+		for doctype in doctypes:
+			pairs_by_doctype.setdefault(doctype, set()).add((trc, vr))
+
+	matches_by_pair = {}
+	fields_missing_doctypes_by_pair = {}
+
+	for doctype, trc_vr_set in pairs_by_doctype.items():
 		meta = frappe.get_meta(doctype)
 		has_split = meta.has_field("epromise_trc_code") and meta.has_field("epromise_vr_no")
 		has_legacy = meta.has_field("epromise_vr")
 
 		if not has_split and not has_legacy:
 			for pair in trc_vr_set:
-				result[pair] = (doctype, "fields_missing", None, [])
+				fields_missing_doctypes_by_pair.setdefault(pair, set()).add(doctype)
 			continue
 
-		matches_by_pair = {}
+		found_by_pair = {}
 
 		if has_split:
 			vr_list = sorted({vr for _, vr in trc_vr_set})
@@ -324,10 +358,10 @@ def _classify_bulk(pairs):
 			):
 				key = (r.epromise_trc_code, r.epromise_vr_no)
 				if key in trc_vr_set:
-					matches_by_pair.setdefault(key, []).append(r.name)
+					found_by_pair.setdefault(key, []).append(r.name)
 
 		if has_legacy:
-			still_missing = trc_vr_set - matches_by_pair.keys()
+			still_missing = trc_vr_set - found_by_pair.keys()
 			if still_missing:
 				legacy_to_pair = {f"{trc}|{vr}": (trc, vr) for trc, vr in still_missing}
 				for r in frappe.get_all(
@@ -336,16 +370,28 @@ def _classify_bulk(pairs):
 				):
 					pair = legacy_to_pair.get(r.epromise_vr)
 					if pair:
-						matches_by_pair.setdefault(pair, []).append(r.name)
+						found_by_pair.setdefault(pair, []).append(r.name)
 
-		for pair in trc_vr_set:
-			names = matches_by_pair.get(pair, [])
-			if not names:
-				result[pair] = (doctype, "unmatched", None, [])
-			elif len(names) > 1:
-				result[pair] = (doctype, "duplicate", None, names)
+		for pair, names in found_by_pair.items():
+			matches_by_pair.setdefault(pair, []).extend((doctype, n) for n in names)
+
+	for trc, vr in pairs:
+		pair = (trc, vr)
+		doctypes = candidate_doctypes_by_pair[pair]
+		if doctypes is None:
+			continue  # already set to out_of_scope above
+
+		matches = matches_by_pair.get(pair, [])
+		if not matches:
+			missing = fields_missing_doctypes_by_pair.get(pair, set())
+			if missing == set(doctypes):
+				result[pair] = (doctypes[0], "fields_missing", None, [])
 			else:
-				result[pair] = (doctype, "clean", names[0], [])
+				result[pair] = (doctypes[0], "unmatched", None, [])
+		elif len(matches) > 1:
+			result[pair] = (matches[0][0], "duplicate", None, [{"doctype": d, "name": n} for d, n in matches])
+		else:
+			result[pair] = (matches[0][0], "clean", matches[0][1], [])
 
 	return result
 
