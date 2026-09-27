@@ -31,12 +31,24 @@ from frappe.utils.file_manager import save_file
 #: of 1141 003/004 rows the old single-doctype lookup called unmatched, 1140 were sitting in
 #: Journal Entry all along, findable by the SAME epromise_vr legacy key. _classify/_classify_bulk
 #: below search every candidate in order and report whichever one actually has the match.
+#: 025 (bank payment vouchers), 011 (customs/import VAT), BA (party settlements), 006 (non-goods
+#: expense vouchers -- audit fee, air tickets, vehicle repair -- reimported via the account's own
+#: "import_missing" GL-faithful pass) were ALSO always Journal Entry (confirmed both by gl_faithful/
+#: config.py's own trc->doctype map and, live on this site 2026-09-28, real submitted JEs matching
+#: each one's epromise_vr key) -- just missing from this ROUTING table entirely, so every one of
+#: their attachments read as "out_of_scope" (looked never-migrated) when they were in fact migrated
+#: fine. Deliberately NOT added: "301"/"300" (inventory-adjustment vouchers, LOCAL_CUR_AMT always
+#: 0 -- confirmed live, no GL/financial document was ever meant to exist for these, an accepted
+#: migration gap) and "EMP"/"RHD" (0 rows in dichdata, the transactional voucher database, under
+#: EITHER code -- these attachments belong to some other ePromise subsystem entirely, not a
+#: financial voucher this migration ever touched).
 ROUTING = {
 	"S01": ["Sales Invoice"], "S06": ["Sales Invoice"], "R01": ["Sales Invoice"], "R04": ["Sales Invoice"],
 	"350": ["Purchase Invoice"], "111": ["Purchase Invoice"], "IP": ["Purchase Invoice"], "PR": ["Purchase Invoice"],
 	"GRN": ["Purchase Receipt"], "GR": ["Purchase Receipt"],
 	"003": ["Payment Entry", "Journal Entry"], "004": ["Payment Entry", "Journal Entry"],
 	"020": ["Journal Entry"], "007": ["Journal Entry"],
+	"025": ["Journal Entry"], "011": ["Journal Entry"], "BA": ["Journal Entry"], "006": ["Journal Entry"],
 }
 
 PREVIEWABLE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -255,7 +267,50 @@ def suggest_candidates(doctype, fy_code, trc_code, vr_no, days_window=15, limit=
 	return {"voucher": voucher, "candidates": rows[: frappe.utils.cint(limit) or 10]}
 
 
-def _classify(trc, vr_no):
+def _get_candidate_dates(doctype, names):
+	"""posting_date for each of these already-submitted candidate docs, one batched query."""
+	if not names:
+		return {}
+	return {
+		r.name: r.posting_date
+		for r in frappe.get_all(doctype, filters={"name": ["in", names]}, fields=["name", "posting_date"])
+	}
+
+
+def _resolve_ties_by_date(matches, source_vr_date):
+	"""matches: list of (doctype, name), already docstatus!=2 filtered. When more than one remains
+	and the ePromise voucher's own date is known, keep only whichever candidate(s) sit closest to
+	it (by posting_date) -- a genuine same-key coincidence across two unrelated documents is rare,
+	and the far more common cause of a lingering tie after the docstatus filter is a voucher and a
+	near-identical OTHER voucher that happen to reuse the same VR_NO, which real dates tell apart.
+	Never narrows past an honest tie: if the closest date is shared by more than one candidate (or
+	no date is known for any of them), the original list comes back unchanged -- this only ever
+	REMOVES candidates it has positive date evidence against, never picks a winner by coin flip."""
+	if len(matches) <= 1 or not source_vr_date:
+		return matches
+	source_date = frappe.utils.getdate(source_vr_date)
+
+	dates = {}
+	by_doctype = {}
+	for doctype, name in matches:
+		by_doctype.setdefault(doctype, []).append(name)
+	for doctype, names in by_doctype.items():
+		for name, posting_date in _get_candidate_dates(doctype, names).items():
+			dates[(doctype, name)] = posting_date
+
+	scored = [
+		(abs((frappe.utils.getdate(dates[(d, n)]) - source_date).days), d, n)
+		for d, n in matches if dates.get((d, n))
+	]
+	if not scored:
+		return matches
+
+	best_diff = min(s[0] for s in scored)
+	tied = [(d, n) for diff, d, n in scored if diff == best_diff]
+	return tied if 0 < len(tied) < len(matches) else matches
+
+
+def _classify(trc, vr_no, vr_date=None):
 	"""Single-row classify: return (doctype_or_None, status, matched_name_or_None, candidates).
 	Used by the single-row actions (attach_row/detach_row). For scanning many rows at once (the
 	table/status-bar), use _classify_bulk() instead -- see its docstring for why.
@@ -270,7 +325,14 @@ def _classify(trc, vr_no):
 
 	ROUTING now maps a trc to a LIST of candidate doctypes (003/004 can be either Payment Entry or
 	Journal Entry -- see ROUTING's own docstring); every candidate is searched and every match
-	collected before deciding clean/unmatched/duplicate, across doctypes."""
+	collected before deciding clean/unmatched/duplicate, across doctypes.
+
+	2026-09-28, client call: a cancelled document (docstatus=2) must never count as a match -- an
+	amended voucher (cancel + resubmit with a "-1" suffix) otherwise pairs its own cancelled
+	original against its live replacement under the exact same epromise_vr key, reading as a false
+	"duplicate" (confirmed live: 025's own JE ACC-JV-2026-04250 cancelled + ACC-JV-2026-04250-1
+	live, same key). vr_date, when given, additionally breaks a genuine remaining tie by date
+	proximity -- see _resolve_ties_by_date."""
 	doctypes = ROUTING.get(trc)
 	if not doctypes:
 		return None, "out_of_scope", None, []
@@ -292,11 +354,13 @@ def _classify(trc, vr_no):
 		matches = []
 		if has_split:
 			matches = frappe.get_all(
-				doctype, filters={"epromise_trc_code": trc, "epromise_vr_no": vr_no}, pluck="name"
+				doctype,
+				filters={"epromise_trc_code": trc, "epromise_vr_no": vr_no, "docstatus": ["!=", 2]},
+				pluck="name",
 			)
 		if not matches and has_legacy:
 			matches = frappe.get_all(
-				doctype, filters={"epromise_vr": f"{trc}|{vr_no}"}, pluck="name"
+				doctype, filters={"epromise_vr": f"{trc}|{vr_no}", "docstatus": ["!=", 2]}, pluck="name"
 			)
 		all_matches.extend((doctype, name) for name in matches)
 
@@ -304,6 +368,9 @@ def _classify(trc, vr_no):
 		if fields_missing_doctypes == set(doctypes):
 			return doctypes[0], "fields_missing", None, []
 		return doctypes[0], "unmatched", None, []
+
+	all_matches = _resolve_ties_by_date(all_matches, vr_date)
+
 	if len(all_matches) > 1:
 		return all_matches[0][0], "duplicate", None, [{"doctype": d, "name": n} for d, n in all_matches]
 
@@ -311,7 +378,7 @@ def _classify(trc, vr_no):
 	return doctype, "clean", name, []
 
 
-def _classify_bulk(pairs):
+def _classify_bulk(pairs, vr_dates=None):
 	"""Classify many (trc, vr) pairs in a FIXED number of queries (2 per involved doctype: split
 	fields + legacy fallback) instead of _classify()'s 1-2 queries PER PAIR. get_rows() scans every
 	attachment row on every page load/refresh (often 1000s of rows) -- calling _classify() in that
@@ -320,7 +387,15 @@ def _classify_bulk(pairs):
 
 	A trc can route to MULTIPLE candidate doctypes (003/004 -- see ROUTING's own docstring), so
 	each candidate doctype is queried across every pair that lists it, and matches from every
-	candidate are merged per pair before deciding clean/unmatched/duplicate/fields_missing."""
+	candidate are merged per pair before deciding clean/unmatched/duplicate/fields_missing.
+
+	vr_dates: optional {(trc, vr): vr_date} -- get_rows() already has each row's own ePromise
+	voucher date on hand, so it's passed straight through here to break a still-remaining tie by
+	date proximity (see _resolve_ties_by_date) rather than this function re-fetching it. Cancelled
+	documents (docstatus=2) are excluded from matches outright, not merely tie-broken -- see
+	_classify's own docstring for why (an amended voucher's cancelled original vs. its live
+	replacement)."""
+	vr_dates = vr_dates or {}
 	result = {}
 	candidate_doctypes_by_pair = {}
 	pairs_by_doctype = {}
@@ -353,7 +428,10 @@ def _classify_bulk(pairs):
 			vr_list = sorted({vr for _, vr in trc_vr_set})
 			for r in frappe.get_all(
 				doctype,
-				filters={"epromise_vr_no": ["in", vr_list], "epromise_trc_code": ["not in", ["", None]]},
+				filters={
+					"epromise_vr_no": ["in", vr_list], "epromise_trc_code": ["not in", ["", None]],
+					"docstatus": ["!=", 2],
+				},
 				fields=["name", "epromise_trc_code", "epromise_vr_no"],
 			):
 				key = (r.epromise_trc_code, r.epromise_vr_no)
@@ -365,7 +443,8 @@ def _classify_bulk(pairs):
 			if still_missing:
 				legacy_to_pair = {f"{trc}|{vr}": (trc, vr) for trc, vr in still_missing}
 				for r in frappe.get_all(
-					doctype, filters={"epromise_vr": ["in", list(legacy_to_pair.keys())]},
+					doctype,
+					filters={"epromise_vr": ["in", list(legacy_to_pair.keys())], "docstatus": ["!=", 2]},
 					fields=["name", "epromise_vr"],
 				):
 					pair = legacy_to_pair.get(r.epromise_vr)
@@ -388,7 +467,11 @@ def _classify_bulk(pairs):
 				result[pair] = (doctypes[0], "fields_missing", None, [])
 			else:
 				result[pair] = (doctypes[0], "unmatched", None, [])
-		elif len(matches) > 1:
+			continue
+
+		matches = _resolve_ties_by_date(matches, vr_dates.get(pair))
+
+		if len(matches) > 1:
 			result[pair] = (matches[0][0], "duplicate", None, [{"doctype": d, "name": n} for d, n in matches])
 		else:
 			result[pair] = (matches[0][0], "clean", matches[0][1], [])
@@ -465,7 +548,8 @@ def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=No
 	conn.close()
 
 	pairs = [((row["TRC_CODE"] or "").strip(), str(row["VR_NO"]).strip()) for row in all_rows]
-	match_index = _classify_bulk(set(pairs))
+	vr_dates = {pair: row["vr_date"] for row, pair in zip(all_rows, pairs)}
+	match_index = _classify_bulk(set(pairs), vr_dates=vr_dates)
 
 	clean_lookups = []
 	for row, pair in zip(all_rows, pairs):
@@ -535,6 +619,24 @@ def get_preview(fy_code, trc_code, vr_no, attachment):
 	return {"previewable": True, "mime": mime, "data": base64.b64encode(blob).decode("ascii")}
 
 
+def _attachment_vr_date(fy_code, trc_code, vr_no):
+	"""The ePromise voucher's own date for this attachment row, straight from ATTACHMENT_DETAIL --
+	used to break a same-key tie by date proximity (see _resolve_ties_by_date). Single-row actions
+	(attach_row/detach_row) fetch this on demand rather than carrying it in from the caller, since
+	get_rows() already has it in hand for the bulk path and there is no dialog state to thread it
+	through here."""
+	conn = _get_connection()
+	cur = conn.cursor()
+	cur.execute(
+		"SELECT TOP 1 vr_date FROM ATTACHMENT_DETAIL "
+		"WHERE FY_CODE = %(fy)s AND TRC_CODE = %(trc)s AND VR_NO = %(vr)s",
+		{"fy": fy_code, "trc": trc_code, "vr": vr_no},
+	)
+	row = cur.fetchone()
+	conn.close()
+	return row["vr_date"] if row else None
+
+
 @frappe.whitelist()
 def attach_row(fy_code, trc_code, vr_no, attachment, override_doctype=None, override_name=None):
 	_check_role()
@@ -542,7 +644,9 @@ def attach_row(fy_code, trc_code, vr_no, attachment, override_doctype=None, over
 	if override_doctype and override_name:
 		doctype, docname = override_doctype, override_name
 	else:
-		doctype, status, docname, candidates = _classify((trc_code or "").strip(), str(vr_no).strip())
+		trc_code, vr_no = (trc_code or "").strip(), str(vr_no).strip()
+		vr_date = _attachment_vr_date(fy_code, trc_code, vr_no)
+		doctype, status, docname, candidates = _classify(trc_code, vr_no, vr_date=vr_date)
 		if status != "clean":
 			frappe.throw(_(
 				"Row is not a clean single match ({0}) -- pick a target document explicitly."
@@ -580,7 +684,9 @@ def detach_row(fy_code, trc_code, vr_no, attachment):
 	"""Undo: remove the File this row's attachment created, so a wrong auto/manual attach can be
 	reversed without going to the target document directly. Logged the same as an attach."""
 	_check_role()
-	doctype, status, docname, candidates = _classify((trc_code or "").strip(), str(vr_no).strip())
+	trc_code, vr_no = (trc_code or "").strip(), str(vr_no).strip()
+	vr_date = _attachment_vr_date(fy_code, trc_code, vr_no)
+	doctype, status, docname, candidates = _classify(trc_code, vr_no, vr_date=vr_date)
 	if status not in ("clean", "attached"):
 		# even if the split/legacy fields have since changed underneath it, an already-attached
 		# row must still resolve to SOME doctype+doc to know what to detach from
