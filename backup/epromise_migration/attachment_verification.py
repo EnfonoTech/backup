@@ -347,6 +347,36 @@ def attach_row(fy_code, trc_code, vr_no, attachment, override_doctype=None, over
 
 
 @frappe.whitelist()
+def bulk_attach(trc_code=None, search=None, from_date=None, to_date=None, batch_size=20):
+	"""Attach one batch of currently-'clean' (unambiguous single-match) rows under the given
+	filters, each wrapped in its own try/except so one bad row never aborts the rest. Safe to call
+	repeatedly: a row that succeeds flips from 'clean' to 'attached' and drops out of the next
+	get_rows(status='clean') scan on its own, so the caller just loops this until processed == 0 --
+	no offset/cursor bookkeeping needed. Never touches 'unmatched'/'duplicate' rows -- those still
+	need a human to pick a target, which is the entire point of this review page."""
+	_check_role()
+	batch_size = frappe.utils.cint(batch_size) or 20
+
+	page = get_rows(trc_code=trc_code, status="clean", search=search,
+		from_date=from_date, to_date=to_date, limit_start=0, limit_page_length=batch_size)
+
+	attached, failed = [], []
+	for row in page["rows"]:
+		try:
+			r = attach_row(row["fy_code"], row["trc_code"], row["vr_no"], row["attachment"])
+			attached.append({"trc_code": row["trc_code"], "vr_no": row["vr_no"],
+				"attachment": row["attachment"], "doctype": r["doctype"], "docname": r["docname"],
+				"file_url": r["file_url"]})
+		except Exception as e:
+			frappe.db.rollback()
+			failed.append({"trc_code": row["trc_code"], "vr_no": row["vr_no"],
+				"attachment": row["attachment"], "error": str(e)[:300]})
+
+	return {"processed": len(page["rows"]), "attached": attached, "failed": failed,
+		"remaining_clean_total": page["total"] - len(attached)}
+
+
+@frappe.whitelist()
 def search_candidates(doctype, txt):
 	_check_role()
 	if doctype not in set(ROUTING.values()):

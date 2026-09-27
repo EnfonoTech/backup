@@ -106,6 +106,7 @@ class AttachmentVerification {
 		});
 
 		this.page.set_primary_action('Refresh', () => this.refresh(), 'refresh');
+		this.page.add_action_item('Bulk Attach (clean matches, current filters)', () => this.bulk_attach());
 	}
 
 	setup_table() {
@@ -371,5 +372,78 @@ class AttachmentVerification {
 				});
 			},
 		});
+	}
+
+	bulk_attach() {
+		const me = this;
+		const filter_args = {
+			trc_code: this.trc_field.get_value() || null,
+			search: this.search_field.get_value() || null,
+			from_date: this.from_date_field.get_value() || null,
+			to_date: this.to_date_field.get_value() || null,
+		};
+
+		frappe.call({
+			method: 'backup.epromise_migration.attachment_verification.get_rows',
+			args: Object.assign({}, filter_args, { status: 'clean', limit_start: 0, limit_page_length: 1 }),
+			callback(r) {
+				const total = r.message.total;
+				if (!total) {
+					frappe.msgprint('No "Ready to attach" rows under the current filters.');
+					return;
+				}
+				frappe.confirm(
+					`Bulk-attach all <b>${total}</b> currently "Ready to attach" row(s) under these filters? Rows that are unmatched or ambiguous are never touched -- only clean single-matches.`,
+					() => me.run_bulk_attach(filter_args, total)
+				);
+			},
+		});
+	}
+
+	run_bulk_attach(filter_args, total_estimate) {
+		const me = this;
+		const d = new frappe.ui.Dialog({ title: 'Bulk Attach', fields: [{ fieldname: 'log_html', fieldtype: 'HTML' }] });
+		d.show();
+		d.get_close_btn().hide();
+
+		let attached_count = 0;
+		const failed = [];
+
+		function render() {
+			d.fields_dict.log_html.$wrapper.html(
+				'<div>Attached: <b>' + attached_count + '</b> / ~' + total_estimate + '</div>' +
+				(failed.length ? '<div class="text-danger" style="margin-top:8px;">Failed (' + failed.length + '):</div>' +
+					'<table class="table table-bordered"><tbody>' +
+					failed.map(function (f) {
+						return '<tr><td>' + frappe.utils.escape_html(f.trc_code) + '/' + frappe.utils.escape_html(f.vr_no) +
+							'</td><td>' + frappe.utils.escape_html(f.attachment) + '</td><td class="text-danger">' +
+							frappe.utils.escape_html(f.error) + '</td></tr>';
+					}).join('') + '</tbody></table>' : '')
+			);
+		}
+		render();
+
+		function step() {
+			frappe.call({
+				method: 'backup.epromise_migration.attachment_verification.bulk_attach',
+				args: Object.assign({}, filter_args, { batch_size: 20 }),
+				callback(r) {
+					const msg = r.message;
+					attached_count += msg.attached.length;
+					failed.push(...msg.failed);
+					render();
+
+					if (msg.processed === 0) {
+						d.get_close_btn().show();
+						d.set_title('Bulk Attach -- done');
+						frappe.show_alert({ message: `Bulk attach done: ${attached_count} attached, ${failed.length} failed.`, indicator: failed.length ? 'orange' : 'green' });
+						me.refresh();
+						return;
+					}
+					step();
+				},
+			});
+		}
+		step();
 	}
 }
