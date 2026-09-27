@@ -41,6 +41,22 @@ AMOUNT_FIELD = {
 }
 
 
+def _file_already_attached(doctype, docname, attachment_filename):
+	"""Frappe's own save_file() renames on a naming collision to "{name}{6-char-hash-suffix}{ext}"
+	(frappe/core/doctype/file/utils.py: get_content_hash() -> md5, get_file_name() splices
+	content_hash[-6:] between the name and extension) -- so an EXACT file_name match misses every
+	file that collided with an existing name on disk, which is common (many rows share a filename
+	like "Scan.pdf"). Match by the same name/extension split instead, allowing anything in between."""
+	partial, extn = os.path.splitext(attachment_filename or "")
+	return frappe.db.exists(
+		"File",
+		{
+			"attached_to_doctype": doctype, "attached_to_name": docname,
+			"file_name": ["like", f"{partial}%{extn}"],
+		},
+	)
+
+
 def _check_role():
 	if "System Manager" not in frappe.get_roles():
 		frappe.throw(_("Not permitted"), frappe.PermissionError)
@@ -257,10 +273,7 @@ def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=No
 		doctype, row_status, matched_name, candidates = _classify(trc, vr)
 
 		if row_status == "clean":
-			already = frappe.db.exists(
-				"File", {"attached_to_doctype": doctype, "attached_to_name": matched_name,
-					"file_name": row["ATTACHMENT"]}
-			)
+			already = _file_already_attached(doctype, matched_name, row["ATTACHMENT"])
 			if already:
 				row_status = "attached"
 
@@ -324,8 +337,7 @@ def attach_row(fy_code, trc_code, vr_no, attachment, override_doctype=None, over
 	if not frappe.has_permission(doctype, "write", doc=docname):
 		frappe.throw(_("No write permission on {0} {1}").format(doctype, docname), frappe.PermissionError)
 
-	if frappe.db.exists("File", {"attached_to_doctype": doctype, "attached_to_name": docname,
-			"file_name": attachment}):
+	if _file_already_attached(doctype, docname, attachment):
 		frappe.throw(_("This attachment is already on {0} {1}").format(doctype, docname))
 
 	conn = _get_connection()
