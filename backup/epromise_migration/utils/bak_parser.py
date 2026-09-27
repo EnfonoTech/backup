@@ -167,14 +167,66 @@ def connect_mssql(settings):
 	) from last_err
 
 
+def _probe_transactional_schema(cur, result):
+	"""dichdata-family checks -- the main ePromise transactional database."""
+	cur.execute("""
+		SELECT
+			SUM(CASE WHEN trc_code = 'S01' THEN 1 ELSE 0 END) AS s01_count,
+			SUM(CASE WHEN trc_code = 'S06' THEN 1 ELSE 0 END) AS s06_count,
+			SUM(CASE WHEN trc_code IN ('S01','S06') AND posted_ind = 'Y' THEN 1 ELSE 0 END) AS submitted,
+			COUNT(*) AS total
+		FROM dichdata
+		WHERE trc_code IN ('S01', 'S06')
+	""")
+	row = cur.fetchone()
+	result["counts"]["dichdata"] = dict(row) if row else {}
+
+	cur.execute("SELECT COUNT(*) AS cnt FROM INVOICE_DETAIL")
+	r = cur.fetchone()
+	result["counts"]["invoice_detail"] = r["cnt"] if r else 0
+
+	cur.execute("SELECT COUNT(*) AS cnt FROM sales_data WHERE trc_code IN ('S01','S06')")
+	r = cur.fetchone()
+	result["counts"]["sales_data"] = r["cnt"] if r else 0
+
+	cur.execute("SELECT COUNT(*) AS cnt FROM dicadmas WHERE ah_code = '1' AND sub_head = 'D'")
+	r = cur.fetchone()
+	result["counts"]["customers"] = r["cnt"] if r else 0
+
+
+def _probe_attachment_schema(cur, result):
+	"""ATTACHMENT_DETAIL -- the separate per-year Attachment_<Company> database (file blobs
+	for cash payments/purchase bills/etc, keyed by FY_CODE+TRC_CODE+VR_NO -- same voucher key
+	as dichdata, just a different database on the same SQL Server instance)."""
+	cur.execute("SELECT COUNT(*) AS cnt FROM ATTACHMENT_DETAIL")
+	r = cur.fetchone()
+	result["counts"]["attachment_detail"] = r["cnt"] if r else 0
+
+	cur.execute("SELECT COUNT(*) AS cnt FROM ATTACHMENT_DETAIL WHERE imageobject IS NOT NULL")
+	r = cur.fetchone()
+	result["counts"]["attachment_detail_with_file"] = r["cnt"] if r else 0
+
+	cur.execute("SELECT COUNT(*) AS cnt FROM ATTACHMENT_DETAIL WHERE TRC_CODE = 'EMP'")
+	r = cur.fetchone()
+	result["counts"]["attachment_detail_employee_docs"] = r["cnt"] if r else 0
+
+
 def test_mssql_connection(host, port, database, user, password):
 	"""
 	Standalone connection test — returns (success, message, sample_counts).
 	Used from the migration page Test Connection button.
+
+	Schema-aware: an ePromise SQL Server instance hosts BOTH the transactional database
+	(dichdata) and a separate per-company Attachment_* database (ATTACHMENT_DETAIL) for file
+	blobs. Which one is "correct" depends on what this Settings record is being used for right
+	now -- this used to hard-fail with a raw "Invalid object name 'dichdata'" the moment someone
+	pointed Database Name at an Attachment_* database to pull files, even though that connection
+	is completely valid for THAT purpose. Detect which schema is actually present and report the
+	matching counts instead of assuming transactional.
 	"""
 	import pymssql
 
-	result = {"connected": False, "message": "", "counts": {}}
+	result = {"connected": False, "message": "", "counts": {}, "schema": None}
 	try:
 		conn = pymssql.connect(
 			server=host,
@@ -187,33 +239,26 @@ def test_mssql_connection(host, port, database, user, password):
 		)
 		cur = conn.cursor()
 
-		# Verify dichdata exists and count records
 		cur.execute("""
-			SELECT
-				SUM(CASE WHEN trc_code = 'S01' THEN 1 ELSE 0 END) AS s01_count,
-				SUM(CASE WHEN trc_code = 'S06' THEN 1 ELSE 0 END) AS s06_count,
-				SUM(CASE WHEN trc_code IN ('S01','S06') AND posted_ind = 'Y' THEN 1 ELSE 0 END) AS submitted,
-				COUNT(*) AS total
-			FROM dichdata
-			WHERE trc_code IN ('S01', 'S06')
+			SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+			WHERE TABLE_NAME IN ('dichdata', 'ATTACHMENT_DETAIL')
 		""")
-		row = cur.fetchone()
-		result["counts"]["dichdata"] = dict(row) if row else {}
+		available = {r["TABLE_NAME"].lower() for r in cur.fetchall()}
 
-		# Check INVOICE_DETAIL
-		cur.execute("SELECT COUNT(*) AS cnt FROM INVOICE_DETAIL")
-		r = cur.fetchone()
-		result["counts"]["invoice_detail"] = r["cnt"] if r else 0
-
-		# Check sales_data
-		cur.execute("SELECT COUNT(*) AS cnt FROM sales_data WHERE trc_code IN ('S01','S06')")
-		r = cur.fetchone()
-		result["counts"]["sales_data"] = r["cnt"] if r else 0
-
-		# Check dicadmas (customer master)
-		cur.execute("SELECT COUNT(*) AS cnt FROM dicadmas WHERE ah_code = '1' AND sub_head = 'D'")
-		r = cur.fetchone()
-		result["counts"]["customers"] = r["cnt"] if r else 0
+		if "dichdata" in available:
+			result["schema"] = "transactional"
+			_probe_transactional_schema(cur, result)
+		elif "attachment_detail" in available:
+			result["schema"] = "attachment"
+			_probe_attachment_schema(cur, result)
+		else:
+			conn.close()
+			result["message"] = (
+				f"Connected to {database} on {host}:{port}, but it has neither dichdata "
+				"(the ePromise transactional database) nor ATTACHMENT_DETAIL (an Attachment_* "
+				"database) -- check the Database Name."
+			)
+			return result
 
 		conn.close()
 		result["connected"] = True
