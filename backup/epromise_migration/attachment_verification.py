@@ -597,7 +597,11 @@ def _bulk_already_attached(clean_lookups):
 
 
 def _bulk_content_hash_attached(candidates):
-	"""candidates: list of {fy_code, trc_code, vr_no, attachment, doctype, matched_name} for rows
+	"""NOT currently called from get_rows() -- see get_rows' own note on why. Kept here for a
+	future async/cached implementation; do not wire this into the synchronous listing path again
+	without one, or a real page load can outrun gunicorn's own worker timeout (see below).
+
+	candidates: list of {fy_code, trc_code, vr_no, attachment, doctype, matched_name} for rows
 	that already look 'clean' under the cheap filename check above. Confirms each one by CONTENT
 	HASH instead -- see _do_attach's own docstring for why filename alone misses Frappe's own
 	global (site-wide, not scoped to attached_to_doctype/name) content-hash storage dedup: this
@@ -607,11 +611,13 @@ def _bulk_content_hash_attached(candidates):
 	ACC-PINV-2026-01716 alone had 16 rows all sharing one content_hash, none matching the source
 	row's own requested filename at all).
 
-	Costs one MSSQL blob fetch per candidate on a single shared connection -- deliberately run
-	ONLY against the (normally small) still-clean set this function receives, never the full
-	attachment table, so a big backlog of genuinely-new attachments doesn't turn every page load
-	into a blob-by-blob fetch. Returns the subset, as {(doctype, matched_name, attachment)} tuples,
-	that are already attached to their own matched target under a different name."""
+	2026-09-28, tried wiring this synchronously into get_rows() as a second pass over whatever
+	survives the name check: even against the (already small) still-clean set of the time, ~39
+	rows, it took long enough to SIGKILL two live gunicorn workers on this site's own 120s worker
+	timeout -- one MSSQL blob fetch per candidate, over the network to a remote SQL Server, is
+	simply too slow to run synchronously inside a request that a page load is waiting on. The
+	write-time guard in _do_attach (checked once, only at the moment of an actual attach, where
+	the blob is already being fetched anyway) is the safe place for this same check -- it stays."""
 	if not candidates:
 		return set()
 
@@ -686,25 +692,11 @@ def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=No
 	match_index = _classify_bulk(set(pairs), vr_dates=vr_dates)
 
 	clean_lookups = []
-	clean_candidates = []
 	for row, pair in zip(all_rows, pairs):
 		doctype, row_status, matched_name, candidates = match_index[pair]
 		if row_status == "clean":
 			clean_lookups.append((doctype, matched_name, row["ATTACHMENT"]))
-			clean_candidates.append({
-				"fy_code": row["FY_CODE"], "trc_code": pair[0], "vr_no": pair[1],
-				"attachment": row["ATTACHMENT"], "doctype": doctype, "matched_name": matched_name,
-			})
 	already_attached = _bulk_already_attached(clean_lookups)
-
-	# only content-hash-verify whatever's STILL "clean" after the cheap name check -- rows the name
-	# check already caught don't need re-confirming, and this second pass is the expensive one
-	# (one MSSQL blob fetch each) -- see _bulk_content_hash_attached's own docstring for why.
-	still_unverified = [
-		c for c in clean_candidates
-		if (c["doctype"], c["matched_name"], c["attachment"]) not in already_attached
-	]
-	already_attached = already_attached | _bulk_content_hash_attached(still_unverified)
 
 	counts = {"clean": 0, "attached": 0, "unmatched": 0, "duplicate": 0,
 		"out_of_scope": 0, "fields_missing": 0}
