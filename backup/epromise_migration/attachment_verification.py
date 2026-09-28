@@ -596,6 +596,53 @@ def _bulk_already_attached(clean_lookups):
 	return already
 
 
+def _bulk_content_hash_attached(candidates):
+	"""candidates: list of {fy_code, trc_code, vr_no, attachment, doctype, matched_name} for rows
+	that already look 'clean' under the cheap filename check above. Confirms each one by CONTENT
+	HASH instead -- see _do_attach's own docstring for why filename alone misses Frappe's own
+	global (site-wide, not scoped to attached_to_doctype/name) content-hash storage dedup: this
+	account's legacy scans are full of byte-identical duplicates re-filed under different
+	auto-generated names, so save_file() silently reuses an earlier upload's name and the
+	name-pattern check above can never recognize the result (confirmed live, 2026-09-28:
+	ACC-PINV-2026-01716 alone had 16 rows all sharing one content_hash, none matching the source
+	row's own requested filename at all).
+
+	Costs one MSSQL blob fetch per candidate on a single shared connection -- deliberately run
+	ONLY against the (normally small) still-clean set this function receives, never the full
+	attachment table, so a big backlog of genuinely-new attachments doesn't turn every page load
+	into a blob-by-blob fetch. Returns the subset, as {(doctype, matched_name, attachment)} tuples,
+	that are already attached to their own matched target under a different name."""
+	if not candidates:
+		return set()
+
+	conn = _get_connection()
+	already = set()
+	try:
+		for c in candidates:
+			cur = conn.cursor()
+			cur.execute(
+				"SELECT TOP 1 imageobject FROM ATTACHMENT_DETAIL "
+				"WHERE FY_CODE = %(fy)s AND TRC_CODE = %(trc)s AND VR_NO = %(vr)s AND ATTACHMENT = %(att)s",
+				{"fy": c["fy_code"], "trc": c["trc_code"], "vr": c["vr_no"], "att": c["attachment"]},
+			)
+			row = cur.fetchone()
+			if not row or not row["imageobject"]:
+				continue  # let the existing "blob not found" surface at attach time, not here
+			content_hash = get_content_hash(bytes(row["imageobject"]))
+			if frappe.db.exists(
+				"File",
+				{
+					"content_hash": content_hash,
+					"attached_to_doctype": c["doctype"],
+					"attached_to_name": c["matched_name"],
+				},
+			):
+				already.add((c["doctype"], c["matched_name"], c["attachment"]))
+	finally:
+		conn.close()
+	return already
+
+
 @frappe.whitelist()
 def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=None,
 		target_doctype=None, limit_start=0, limit_page_length=50):
@@ -639,11 +686,25 @@ def get_rows(trc_code=None, status=None, search=None, from_date=None, to_date=No
 	match_index = _classify_bulk(set(pairs), vr_dates=vr_dates)
 
 	clean_lookups = []
+	clean_candidates = []
 	for row, pair in zip(all_rows, pairs):
 		doctype, row_status, matched_name, candidates = match_index[pair]
 		if row_status == "clean":
 			clean_lookups.append((doctype, matched_name, row["ATTACHMENT"]))
+			clean_candidates.append({
+				"fy_code": row["FY_CODE"], "trc_code": pair[0], "vr_no": pair[1],
+				"attachment": row["ATTACHMENT"], "doctype": doctype, "matched_name": matched_name,
+			})
 	already_attached = _bulk_already_attached(clean_lookups)
+
+	# only content-hash-verify whatever's STILL "clean" after the cheap name check -- rows the name
+	# check already caught don't need re-confirming, and this second pass is the expensive one
+	# (one MSSQL blob fetch each) -- see _bulk_content_hash_attached's own docstring for why.
+	still_unverified = [
+		c for c in clean_candidates
+		if (c["doctype"], c["matched_name"], c["attachment"]) not in already_attached
+	]
+	already_attached = already_attached | _bulk_content_hash_attached(still_unverified)
 
 	counts = {"clean": 0, "attached": 0, "unmatched": 0, "duplicate": 0,
 		"out_of_scope": 0, "fields_missing": 0}
