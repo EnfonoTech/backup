@@ -19,7 +19,7 @@ import os
 
 import frappe
 from frappe import _
-from frappe.utils.file_manager import save_file
+from frappe.utils.file_manager import get_content_hash, save_file
 
 #: trc_code -> ordered list of candidate ERPNext doctypes to search for a match. Almost always
 #: one doctype, EXCEPT 003/004 (cash payment / cash receipt vouchers): payment_importer.py's own
@@ -731,7 +731,22 @@ def _do_attach(doctype, docname, fy_code, trc_code, vr_no, attachment, conn=None
 	instead -- see bulk_attach's own docstring for why a connection-per-row was the actual cause of
 	a bulk run looking stuck (2026-09-28: measured 1.4s just to OPEN a connection to this MSSQL
 	server; at 20 rows/batch that's ~28s of pure connect overhead before a single blob is fetched,
-	on a page that gives no in-batch progress feedback -- looked hung, was just badly throttled)."""
+	on a page that gives no in-batch progress feedback -- looked hung, was just badly throttled).
+
+	2026-09-28, second and more serious bug found the same day: this account's legacy scans are
+	full of byte-IDENTICAL duplicates re-filed under different names (the same photo/scan uploaded
+	multiple times under auto-generated timestamp filenames) -- confirmed live: a single manual
+	"Attach" on 003/102600788 "SALEH 15.6.26.jpeg" returned file_url ".../SALEH ALJALLAWI-....jpeg"
+	and the row STILL showed "Ready to attach" afterward. Root cause, read straight out of this
+	site's own frappe/utils/file_manager.py (save_file -> get_file_data_from_hash): Frappe dedupes
+	physical storage by content_hash GLOBALLY (not scoped to attached_to_doctype/name at all) and,
+	when it finds an existing File with the same hash, reuses that EARLIER file's own file_name/
+	file_url wholesale -- the freshly-computed name from THIS call's own `attachment` argument is
+	silently discarded. _file_already_attached's name-pattern guard above can therefore never
+	recognize the result, so a bulk run hit this on ~30 documents and looped 10-14x each,
+	creating real duplicate File rows every round with no error and no progress. Guard against it
+	by content_hash directly, scoped to (doctype, docname) -- the blob is already in hand here, so
+	hashing it costs nothing extra."""
 	if not frappe.db.exists(doctype, docname):
 		frappe.throw(_("{0} {1} does not exist").format(doctype, docname))
 	if not frappe.has_permission(doctype, "write", doc=docname):
@@ -758,7 +773,17 @@ def _do_attach(doctype, docname, fy_code, trc_code, vr_no, attachment, conn=None
 	if not row or not row["imageobject"]:
 		frappe.throw(_("Blob not found for this row"))
 
-	f = save_file(attachment, row["imageobject"], doctype, docname, is_private=0, decode=False)
+	blob = row["imageobject"]
+	content_hash = get_content_hash(bytes(blob))
+	if frappe.db.exists(
+		"File", {"content_hash": content_hash, "attached_to_doctype": doctype, "attached_to_name": docname}
+	):
+		frappe.throw(_(
+			"This exact file content is already attached to {0} {1} (Frappe's own storage dedup "
+			"reused an earlier upload's filename, so it wasn't caught by name)"
+		).format(doctype, docname))
+
+	f = save_file(attachment, blob, doctype, docname, is_private=0, decode=False)
 	frappe.db.commit()
 	_log_action("Attached", doctype, docname, trc_code, vr_no, attachment, f.name)
 	return {"file_url": f.file_url, "doctype": doctype, "docname": docname}
